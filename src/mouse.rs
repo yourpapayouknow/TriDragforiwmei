@@ -1,9 +1,9 @@
 use std::sync::Mutex;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT,
+    SendInput, INPUT, INPUT_0, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT,
+    MOUSE_EVENT_FLAGS,
 };
 
 use crate::config::MouseButton;
@@ -27,10 +27,6 @@ impl Point {
         Self { x, y }
     }
 
-    pub fn is_zero(&self) -> bool {
-        self.x == 0.0 && self.y == 0.0
-    }
-
     pub fn length(&self) -> f32 {
         (self.x * self.x + self.y * self.y).sqrt()
     }
@@ -42,81 +38,57 @@ impl Point {
 }
 
 pub fn send_move(dx: f32, dy: f32) {
-    let mut frac = FRACTION.lock().unwrap();
-    let total_x = dx + frac.0;
-    let total_y = dy + frac.1;
-    let ix = total_x as i32;
-    let iy = total_y as i32;
-    frac.0 = total_x - ix as f32;
-    frac.1 = total_y - iy as f32;
-    drop(frac);
+    let (ix, iy) = {
+        let mut frac = FRACTION.lock().unwrap();
+        let total_x = dx + frac.0;
+        let total_y = dy + frac.1;
+        let ix = total_x as i32;
+        let iy = total_y as i32;
+        frac.0 = total_x - ix as f32;
+        frac.1 = total_y - iy as f32;
+        (ix, iy)
+    };
 
     if ix == 0 && iy == 0 {
         return;
     }
 
-    unsafe {
-        let input = INPUT {
-            r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: ix,
-                    dy: iy,
-                    mouseData: 0,
-                    dwFlags: MOUSEEVENTF_MOVE,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
-    }
+    send_mouse_input(ix, iy, MOUSEEVENTF_MOVE);
 }
 
-pub fn send_button_down(button: &MouseButton) {
+pub fn send_button_down(button: MouseButton) {
     let flag = match button {
         MouseButton::Left => MOUSEEVENTF_LEFTDOWN,
         MouseButton::Right => MOUSEEVENTF_RIGHTDOWN,
         MouseButton::Middle => MOUSEEVENTF_MIDDLEDOWN,
     };
-    unsafe {
-        let input = INPUT {
-            r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: 0,
-                    dy: 0,
-                    mouseData: 0,
-                    dwFlags: flag,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
-    }
+    send_mouse_input(0, 0, flag);
 }
 
-pub fn send_button_up(button: &MouseButton) {
+pub fn send_button_up(button: MouseButton) {
     let flag = match button {
         MouseButton::Left => MOUSEEVENTF_LEFTUP,
         MouseButton::Right => MOUSEEVENTF_RIGHTUP,
         MouseButton::Middle => MOUSEEVENTF_MIDDLEUP,
     };
-    unsafe {
-        let input = INPUT {
-            r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: 0,
-                    dy: 0,
-                    mouseData: 0,
-                    dwFlags: flag,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
+    send_mouse_input(0, 0, flag);
+}
+
+fn send_mouse_input(dx: i32, dy: i32, flags: MOUSE_EVENT_FLAGS) {
+    let input = INPUT {
+        r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx,
+                dy,
+                mouseData: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
             },
-        };
+        },
+    };
+    unsafe {
         SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
     }
 }

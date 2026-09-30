@@ -4,16 +4,15 @@ use std::ptr;
 use anyhow::Result;
 use log::debug;
 use windows::Win32::Devices::HumanInterfaceDevice::{
-    HidP_GetCaps, HidP_GetUsageValue, HidP_GetValueCaps, HidP_Input, HIDP_REPORT_TYPE,
-    HIDP_STATUS_SUCCESS, HIDP_VALUE_CAPS, PHIDP_PREPARSED_DATA,
+    HidP_GetCaps, HidP_GetUsageValue, HidP_GetValueCaps, HidP_Input, HIDP_STATUS_SUCCESS,
+    HIDP_VALUE_CAPS, PHIDP_PREPARSED_DATA,
 };
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{HANDLE, HWND};
 use windows::Win32::UI::Input::{
-    GetRawInputData, GetRawInputDeviceInfoW, HRAWINPUT, RegisterRawInputDevices, RAWINPUT,
-    RAWINPUTDEVICE, RAWINPUTHEADER, RID_DEVICE_INFO, RIDI_DEVICEINFO, RIDI_DEVICENAME,
-    RIDI_PREPARSEDDATA, RID_INPUT, RIM_TYPEHID,
+    GetRawInputData, GetRawInputDeviceInfoW, RegisterRawInputDevices, HRAWINPUT, RAWINPUT,
+    RAWINPUTDEVICE, RAWINPUTHEADER, RIDI_DEVICEINFO, RIDI_DEVICENAME, RIDI_PREPARSEDDATA,
+    RID_DEVICE_INFO, RID_INPUT, RIM_TYPEHID,
 };
-use windows::Win32::Foundation::HWND;
 
 use crate::drag_engine::{DragEngine, TouchpadContact};
 
@@ -28,7 +27,9 @@ pub struct TouchpadEngine {
 #[derive(Debug, Clone)]
 pub struct TouchpadDeviceInfo {
     pub device_id: String,
+    #[allow(dead_code)]
     pub vendor_id: String,
+    #[allow(dead_code)]
     pub product_id: String,
 }
 
@@ -49,10 +50,8 @@ impl TouchpadEngine {
             hwndTarget: hwnd,
         };
         unsafe {
-            let r = RegisterRawInputDevices(&[device], std::mem::size_of::<RAWINPUTDEVICE>() as u32);
-            if r.is_err() {
-                return Err(anyhow::anyhow!("RegisterRawInputDevices failed: {:?}", r.err()));
-            }
+            RegisterRawInputDevices(&[device], std::mem::size_of::<RAWINPUTDEVICE>() as u32)
+                .map_err(|e| anyhow::anyhow!("RegisterRawInputDevices failed: {e:?}"))?;
         }
         Ok(())
     }
@@ -63,161 +62,182 @@ impl TouchpadEngine {
 
     pub fn parse_input(&mut self, lparam: isize) -> Option<Vec<TouchpadContact>> {
         unsafe {
-            let mut size = 0u32;
-            let header_size = std::mem::size_of::<RAWINPUTHEADER>() as u32;
-            if GetRawInputData(
-                HRAWINPUT(lparam as _),
-                RID_INPUT,
-                None,
-                &mut size,
-                header_size,
-            ) == u32::MAX
-            {
-                return None;
-            }
-            if size == 0 {
-                return None;
-            }
-
-            let mut buf = vec![0u8; size as usize];
-            if GetRawInputData(
-                HRAWINPUT(lparam as _),
-                RID_INPUT,
-                Some(buf.as_mut_ptr() as _),
-                &mut size,
-                header_size,
-            ) != size
-            {
-                return None;
-            }
-
-            let raw = ptr::read(buf.as_ptr() as *const RAWINPUT);
-            let hdevice = raw.header.hDevice.0 as isize;
+            let raw_input = self.read_raw_input(lparam)?;
+            let hdevice = raw_input.header.hDevice.0 as isize;
             self.current_device = Some(hdevice);
-            if !self.device_infos.contains_key(&hdevice) {
-                if let Some(info) = self.fetch_device_info(hdevice) {
-                    self.device_infos.insert(hdevice, info);
-                }
+
+            if let Some(info) = self.fetch_device_info(hdevice) {
+                self.device_infos.insert(hdevice, info);
             }
 
-            let hid = raw.data.hid;
-            let total_bytes = (hid.dwSizeHid * hid.dwCount) as usize;
-            let hid_data_offset = buf.len() - total_bytes;
-            let hid_data = &buf[hid_data_offset..];
+            let preparsed = self.fetch_preparse_data(raw_input.header.hDevice)?;
+            let contacts = self.parse_contacts(&raw_input, &preparsed)?;
 
-            let mut preparsed_size = 0u32;
-            if GetRawInputDeviceInfoW(
-                Some(raw.header.hDevice),
-                RIDI_PREPARSEDDATA,
-                None,
-                &mut preparsed_size,
-            ) != 0
-            {
-                return None;
-            }
-            let mut preparsed = vec![0u8; preparsed_size as usize];
-            if GetRawInputDeviceInfoW(
-                Some(raw.header.hDevice),
-                RIDI_PREPARSEDDATA,
-                Some(preparsed.as_mut_ptr() as _),
-                &mut preparsed_size,
-            ) != preparsed_size
-            {
-                return None;
-            }
-
-            let mut caps = std::mem::zeroed();
-            if HidP_GetCaps(PHIDP_PREPARSED_DATA(preparsed.as_ptr() as isize), &mut caps)
-                != HIDP_STATUS_SUCCESS
-            {
-                return None;
-            }
-
-            let mut value_caps_len = caps.NumberInputValueCaps;
-            if value_caps_len == 0 {
-                return None;
-            }
-            let mut value_caps = vec![std::mem::zeroed::<HIDP_VALUE_CAPS>(); value_caps_len as usize];
-            if HidP_GetValueCaps(
-                HidP_Input,
-                value_caps.as_mut_ptr(),
-                &mut value_caps_len,
-                PHIDP_PREPARSED_DATA(preparsed.as_ptr() as isize),
-            ) != HIDP_STATUS_SUCCESS
-            {
-                return None;
-            }
-            value_caps.truncate(value_caps_len as usize);
-
-            let mut contact_count = 0u32;
-            let mut creators: Vec<TouchpadContactBuilder> = Vec::new();
-            let mut contacts: Vec<TouchpadContact> = Vec::new();
-
-            for cap in value_caps.iter() {
-                for idx in 0..hid.dwCount {
-                    let report_ptr = hid_data.as_ptr().add((hid.dwSizeHid * idx) as usize);
-                    let mut value = 0u32;
-                    if HidP_GetUsageValue(
-                        HidP_Input,
-                        cap.UsagePage,
-                        Some(cap.LinkCollection),
-                        unsafe { cap.Anonymous.NotRange.Usage },
-                        &mut value,
-                        PHIDP_PREPARSED_DATA(preparsed.as_ptr() as isize),
-                        std::slice::from_raw_parts(report_ptr, total_bytes),
-                    ) != HIDP_STATUS_SUCCESS
-                    {
-                        continue;
-                    }
-
-                    if cap.LinkCollection == 0 {
-                        match (cap.UsagePage, unsafe { cap.Anonymous.NotRange.Usage }) {
-                            (0x0D, 0x54) => contact_count = value,
-                            _ => {}
-                        }
-                    } else {
-                        while creators.len() <= idx as usize {
-                            creators.push(TouchpadContactBuilder::default());
-                        }
-                        match (cap.UsagePage, unsafe { cap.Anonymous.NotRange.Usage }) {
-                            (0x0D, 0x51) => creators[idx as usize].id = Some(value as i32),
-                            (0x01, 0x30) => creators[idx as usize].x = Some(value as i32),
-                            (0x01, 0x31) => creators[idx as usize].y = Some(value as i32),
-                            _ => {}
-                        }
-                    }
-                }
-
-                for creator in creators.iter_mut() {
-                    if let Some(c) = creator.build() {
-                        if contact_count == 0 || contacts.len() < contact_count as usize {
-                            contacts.push(c);
-                            creator.clear();
-                        }
-                    }
-                }
-                if contact_count != 0 && contacts.len() >= contact_count as usize {
-                    break;
-                }
-            }
-
-            debug!(
-                "Parsed contacts: count={} contacts={:?}",
-                contact_count, contacts
-            );
+            debug!("Parsed contacts: {:?}", contacts);
             Some(contacts)
         }
+    }
+
+    unsafe fn read_raw_input(&self, lparam: isize) -> Option<RAWINPUT> {
+        let mut size = 0u32;
+        let header_size = std::mem::size_of::<RAWINPUTHEADER>() as u32;
+        if GetRawInputData(
+            HRAWINPUT(lparam as _),
+            RID_INPUT,
+            None,
+            &mut size,
+            header_size,
+        ) == u32::MAX
+        {
+            return None;
+        }
+        if size == 0 {
+            return None;
+        }
+
+        let mut buf = vec![0u8; size as usize];
+        if GetRawInputData(
+            HRAWINPUT(lparam as _),
+            RID_INPUT,
+            Some(buf.as_mut_ptr() as _),
+            &mut size,
+            header_size,
+        ) != size
+        {
+            return None;
+        }
+
+        Some(ptr::read(buf.as_ptr() as *const RAWINPUT))
+    }
+
+    unsafe fn fetch_preparse_data(&self, hdevice: HANDLE) -> Option<PreparsedData> {
+        let mut size = 0u32;
+        if GetRawInputDeviceInfoW(Some(hdevice), RIDI_PREPARSEDDATA, None, &mut size) != 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        if GetRawInputDeviceInfoW(
+            Some(hdevice),
+            RIDI_PREPARSEDDATA,
+            Some(buf.as_mut_ptr() as _),
+            &mut size,
+        ) != size
+        {
+            return None;
+        }
+        Some(PreparsedData(buf))
+    }
+
+    unsafe fn parse_contacts(
+        &self,
+        raw: &RAWINPUT,
+        preparsed: &PreparsedData,
+    ) -> Option<Vec<TouchpadContact>> {
+        let preparsed_ptr = PHIDP_PREPARSED_DATA(preparsed.0.as_ptr() as isize);
+
+        let mut caps = std::mem::zeroed();
+        if HidP_GetCaps(preparsed_ptr, &mut caps) != HIDP_STATUS_SUCCESS {
+            return None;
+        }
+
+        let mut value_caps_len = caps.NumberInputValueCaps;
+        if value_caps_len == 0 {
+            return None;
+        }
+        let mut value_caps = vec![std::mem::zeroed::<HIDP_VALUE_CAPS>(); value_caps_len as usize];
+        if HidP_GetValueCaps(
+            HidP_Input,
+            value_caps.as_mut_ptr(),
+            &mut value_caps_len,
+            preparsed_ptr,
+        ) != HIDP_STATUS_SUCCESS
+        {
+            return None;
+        }
+        value_caps.truncate(value_caps_len as usize);
+
+        let hid = raw.data.hid;
+        let total_bytes = (hid.dwSizeHid * hid.dwCount) as usize;
+        let raw_data = self.raw_hid_data(raw, total_bytes)?;
+
+        let mut contact_count = 0u32;
+        let mut creators: Vec<TouchpadContactBuilder> = Vec::new();
+        let mut contacts: Vec<TouchpadContact> = Vec::new();
+
+        for cap in &value_caps {
+            let usage = unsafe { cap.Anonymous.NotRange.Usage };
+            for idx in 0..hid.dwCount {
+                let report = &raw_data[(hid.dwSizeHid * idx) as usize..][..total_bytes];
+                let mut value = 0u32;
+                if HidP_GetUsageValue(
+                    HidP_Input,
+                    cap.UsagePage,
+                    Some(cap.LinkCollection),
+                    usage,
+                    &mut value,
+                    preparsed_ptr,
+                    report,
+                ) != HIDP_STATUS_SUCCESS
+                {
+                    continue;
+                }
+
+                if cap.LinkCollection == 0 {
+                    if cap.UsagePage == 0x0D && usage == 0x54 {
+                        contact_count = value;
+                    }
+                } else {
+                    while creators.len() <= idx as usize {
+                        creators.push(TouchpadContactBuilder::default());
+                    }
+                    match (cap.UsagePage, usage) {
+                        (0x0D, 0x51) => creators[idx as usize].id = Some(value as i32),
+                        (0x01, 0x30) => creators[idx as usize].x = Some(value as i32),
+                        (0x01, 0x31) => creators[idx as usize].y = Some(value as i32),
+                        _ => {}
+                    }
+                }
+            }
+
+            for creator in &mut creators {
+                if let Some(c) = creator.build() {
+                    if contact_count == 0 || contacts.len() < contact_count as usize {
+                        contacts.push(c);
+                        creator.clear();
+                    }
+                }
+            }
+            if contact_count != 0 && contacts.len() >= contact_count as usize {
+                break;
+            }
+        }
+
+        Some(contacts)
+    }
+
+    unsafe fn raw_hid_data(&self, raw: &RAWINPUT, total_bytes: usize) -> Option<Vec<u8>> {
+        let raw_size = (raw.data.hid.dwSizeHid * raw.data.hid.dwCount) as usize;
+        let buf_size = std::mem::size_of::<RAWINPUTHEADER>() + raw_size;
+        let mut buf = vec![0u8; buf_size];
+        let header_size = std::mem::size_of::<RAWINPUTHEADER>() as u32;
+        if GetRawInputData(
+            HRAWINPUT(raw.header.hDevice.0 as _),
+            RID_INPUT,
+            Some(buf.as_mut_ptr() as _),
+            &mut (buf_size as u32),
+            header_size,
+        ) != buf_size as u32
+        {
+            return None;
+        }
+        Some(buf[buf_size - total_bytes..].to_vec())
     }
 
     fn fetch_device_info(&self, hdev: isize) -> Option<TouchpadDeviceInfo> {
         unsafe {
             let mut size = 0u32;
-            if GetRawInputDeviceInfoW(
-                Some(HANDLE(hdev as _)),
-                RIDI_DEVICEINFO,
-                None,
-                &mut size,
-            ) != 0
+            if GetRawInputDeviceInfoW(Some(HANDLE(hdev as _)), RIDI_DEVICEINFO, None, &mut size)
+                != 0
             {
                 return None;
             }
@@ -255,6 +275,8 @@ impl TouchpadEngine {
             .unwrap_or_else(|| "default".to_string())
     }
 }
+
+struct PreparsedData(Vec<u8>);
 
 #[derive(Default)]
 struct TouchpadContactBuilder {
@@ -299,6 +321,9 @@ fn compute_device_id(hdev: isize) -> Option<String> {
             return None;
         }
         let name_str = String::from_utf16_lossy(&name);
-        Some(format!("{:x}", md5::compute(name_str.trim_end_matches('\0'))))
+        Some(format!(
+            "{:x}",
+            md5::compute(name_str.trim_end_matches('\0'))
+        ))
     }
 }

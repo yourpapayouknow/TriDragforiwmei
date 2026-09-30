@@ -5,12 +5,14 @@ use anyhow::{Context, Result};
 use log::info;
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::Shell::{Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW};
+use windows::Win32::UI::Shell::{
+    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos, InsertMenuW, LoadIconW,
-    SetForegroundWindow, TrackPopupMenu, HICON, IDI_APPLICATION, MF_BYPOSITION, MF_CHECKED,
-    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON,
+    PostQuitMessage, SetForegroundWindow, TrackPopupMenu, HICON, HMENU, IDI_APPLICATION,
+    MF_BYPOSITION, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_LEFTALIGN, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON,
 };
 
 use crate::config::Config;
@@ -19,7 +21,6 @@ use crate::scheduler;
 pub struct Tray {
     hwnd: HWND,
     icon: HICON,
-    msg_id: u32,
 }
 
 const ID_ENABLED: u32 = 1;
@@ -40,17 +41,21 @@ impl Tray {
             szTip: [0; 128],
             ..Default::default()
         };
-        let tip = w!("Three-Finger Drag");
+        copy_tooltip(&mut nid.szTip, w!("Three-Finger Drag"));
+
         unsafe {
-            let tip_slice: &[u16] = std::slice::from_raw_parts(tip.0, wcslen(tip.0) + 1);
-            let len = tip_slice.len().min(nid.szTip.len());
-            nid.szTip[..len].copy_from_slice(&tip_slice[..len]);
-            Shell_NotifyIconW(NIM_ADD, &mut nid).ok()?;
+            Shell_NotifyIconW(NIM_ADD, &nid).ok()?;
         }
-        Ok(Self { hwnd, icon, msg_id })
+        Ok(Self { hwnd, icon })
     }
 
-    pub fn handle_event(&mut self, _wparam: WPARAM, lparam: LPARAM, config: &mut Config, config_path: &Path) {
+    pub fn handle_event(
+        &mut self,
+        _wparam: WPARAM,
+        lparam: LPARAM,
+        config: &mut Config,
+        config_path: &Path,
+    ) {
         let event = lparam.0 as u32;
         match event {
             0x0204 | 0x0205 => {
@@ -63,60 +68,23 @@ impl Tray {
 
     fn show_menu(&mut self, config: &mut Config, config_path: &Path) {
         unsafe {
-            SetForegroundWindow(self.hwnd).ok();
+            let _ = SetForegroundWindow(self.hwnd).ok();
             let menu = CreatePopupMenu().unwrap();
 
-            let enabled_text = w!("Enabled");
-            InsertMenuW(
-                menu,
-                0,
-                MF_BYPOSITION | MF_STRING | if config.enabled { MF_CHECKED } else { MF_UNCHECKED },
-                ID_ENABLED as usize,
-                enabled_text,
-            )
-            .ok();
-
-            let boot_text = w!("Start at boot");
-            InsertMenuW(
+            add_menu_item(menu, 0, ID_ENABLED, w!("Enabled"), config.enabled);
+            add_menu_item(
                 menu,
                 1,
-                MF_BYPOSITION | MF_STRING | if config.start_at_boot { MF_CHECKED } else { MF_UNCHECKED },
-                ID_START_BOOT as usize,
-                boot_text,
-            )
-            .ok();
-
-            InsertMenuW(
-                menu,
-                2,
-                MF_BYPOSITION | MF_SEPARATOR,
-                0,
-                w!(""),
-            )
-            .ok();
-
-            let open_text = w!("Open config folder");
-            InsertMenuW(
-                menu,
-                3,
-                MF_BYPOSITION | MF_STRING,
-                ID_OPEN_CONFIG as usize,
-                open_text,
-            )
-            .ok();
-
-            let quit_text = w!("Quit");
-            InsertMenuW(
-                menu,
-                4,
-                MF_BYPOSITION | MF_STRING,
-                ID_QUIT as usize,
-                quit_text,
-            )
-            .ok();
+                ID_START_BOOT,
+                w!("Start at boot"),
+                config.start_at_boot,
+            );
+            add_separator(menu, 2);
+            add_menu_item(menu, 3, ID_OPEN_CONFIG, w!("Open config folder"), false);
+            add_menu_item(menu, 4, ID_QUIT, w!("Quit"), false);
 
             let mut pt = Default::default();
-            GetCursorPos(&mut pt).ok();
+            let _ = GetCursorPos(&mut pt).ok();
             let cmd = TrackPopupMenu(
                 menu,
                 TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN,
@@ -125,11 +93,11 @@ impl Tray {
                 Some(0),
                 self.hwnd,
                 None,
-            ).as_bool() as u32;
-            DestroyMenu(menu).ok();
+            )
+            .as_bool() as u32;
+            let _ = DestroyMenu(menu).ok();
 
-            let cmd_id = cmd;
-            match cmd_id {
+            match cmd {
                 ID_ENABLED => {
                     config.enabled = !config.enabled;
                     let _ = config.save(config_path);
@@ -142,20 +110,14 @@ impl Tray {
                     info!("Start at boot toggled to {}", config.start_at_boot);
                 }
                 ID_OPEN_CONFIG => {
-                    let _ = config_path.parent().map(|p| {
-                        Command::new("explorer.exe").arg(p).spawn()
-                    });
+                    if let Some(parent) = config_path.parent() {
+                        let _ = Command::new("explorer.exe").arg(parent).spawn();
+                    }
                 }
                 ID_QUIT => {
                     let _ = config.save(config_path);
-                    let mut nid = NOTIFYICONDATAW {
-                        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
-                        hWnd: self.hwnd,
-                        uID: 1,
-                        ..Default::default()
-                    };
-                    Shell_NotifyIconW(NIM_DELETE, &mut nid).ok();
-                    windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
+                    remove_icon(self.hwnd);
+                    PostQuitMessage(0);
                 }
                 _ => {}
             }
@@ -163,27 +125,53 @@ impl Tray {
     }
 }
 
-fn wcslen(ptr: *const u16) -> usize {
-    unsafe {
-        let mut i = 0;
-        while *ptr.add(i) != 0 {
-            i += 1;
-        }
-        i
-    }
-}
-
 impl Drop for Tray {
     fn drop(&mut self) {
         unsafe {
-            let mut nid = NOTIFYICONDATAW {
-                cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
-                hWnd: self.hwnd,
-                uID: 1,
-                ..Default::default()
-            };
-            Shell_NotifyIconW(NIM_DELETE, &mut nid).ok();
-            DestroyIcon(self.icon).ok();
+            remove_icon(self.hwnd);
+            let _ = DestroyIcon(self.icon).ok();
         }
     }
+}
+
+unsafe fn add_menu_item(
+    menu: HMENU,
+    pos: u32,
+    id: u32,
+    text: windows::core::PCWSTR,
+    checked: bool,
+) {
+    let flags = MF_BYPOSITION | MF_STRING | if checked { MF_CHECKED } else { MF_UNCHECKED };
+    let _ = InsertMenuW(menu, pos, flags, id as usize, text).ok();
+}
+
+unsafe fn add_separator(menu: HMENU, pos: u32) {
+    let _ = InsertMenuW(menu, pos, MF_BYPOSITION | MF_SEPARATOR, 0, w!("")).ok();
+}
+
+unsafe fn remove_icon(hwnd: HWND) {
+    let nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        ..Default::default()
+    };
+    let _ = Shell_NotifyIconW(NIM_DELETE, &nid).ok();
+}
+
+fn copy_tooltip(dst: &mut [u16], src: windows::core::PCWSTR) {
+    unsafe {
+        let len = wcslen(src.0);
+        let slice = std::slice::from_raw_parts(src.0, len + 1);
+        let copy_len = slice.len().min(dst.len());
+        dst[..copy_len].copy_from_slice(&slice[..copy_len]);
+    }
+}
+
+unsafe fn wcslen(ptr: *const u16) -> usize {
+    let mut i = 0;
+    while *ptr.add(i) != 0 {
+        i += 1;
+    }
+    i
 }

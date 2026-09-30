@@ -85,7 +85,12 @@ fn enable_startup() -> Result<()> {
 
 fn disable_startup() -> Result<()> {
     let output = Command::new("schtasks.exe")
-        .args(["/Delete", "/TN", &format!("{}\\{}", TASK_FOLDER, TASK_NAME), "/F"])
+        .args([
+            "/Delete",
+            "/TN",
+            &format!("{}\\{}", TASK_FOLDER, TASK_NAME),
+            "/F",
+        ])
         .output()
         .context("run schtasks /Delete")?;
 

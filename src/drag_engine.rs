@@ -58,7 +58,8 @@ impl DragEngine {
 
         let are_ids_common = Self::are_ids_common(&self.last_contacts, contacts);
         let (longest_id, longest_delta, longest_dist2d) =
-            self.distance_manager.longest(&self.last_contacts, contacts, has_fingers_released);
+            self.distance_manager
+                .longest(&self.last_contacts, contacts, has_fingers_released);
 
         let (fingers_count, short_delay_moving, long_delay_moving, original_count) =
             self.finger_counter.count(
@@ -71,7 +72,12 @@ impl DragEngine {
 
         debug!(
             "fingers={} original={} moving={}/{} dist={} id={}",
-            fingers_count, original_count, short_delay_moving, long_delay_moving, longest_dist2d, longest_id
+            fingers_count,
+            original_count,
+            short_delay_moving,
+            long_delay_moving,
+            longest_dist2d,
+            longest_id
         );
 
         if fingers_count >= 3
@@ -84,8 +90,7 @@ impl DragEngine {
             self.pending_button = Some(ButtonEvent::Down);
             debug!("START DRAG");
         } else if self.is_dragging
-            && (short_delay_moving < 2
-                || (original_count != 3 && original_count >= 2))
+            && (short_delay_moving < 2 || (original_count != 3 && original_count >= 2))
         {
             debug!("STOP DRAG");
             self.stop_drag();
@@ -93,33 +98,31 @@ impl DragEngine {
             && original_count == 3
             && are_ids_common
             && self.is_dragging
+            && longest_dist2d > 0.0
         {
-            if longest_dist2d > 0.0 {
-                let dev_cfg = config.device_config(&config.current_device_id);
-                if dev_cfg.cursor_move
-                    && (config.max_finger_move_distance == 0.0
-                        || longest_dist2d <= config.max_finger_move_distance)
-                {
-                    let delta = apply_speed_and_acc(longest_delta, elapsed, &dev_cfg);
-                    if config.cursor_averaging > 1 {
-                        self.averaging_x += delta.x;
-                        self.averaging_y += delta.y;
-                        self.averaging_count += 1;
-                        if self.averaging_count >= config.cursor_averaging {
-                            let out = Point::new(self.averaging_x, self.averaging_y);
-                            self.averaging_x = 0.0;
-                            self.averaging_y = 0.0;
-                            self.averaging_count = 0;
-                            self.last_contacts = contacts.to_vec();
-                            return Some(out);
-                        }
-                    } else {
+            let dev_cfg = config.device_config(&config.current_device_id);
+            if dev_cfg.cursor_move
+                && (config.max_finger_move_distance == 0.0
+                    || longest_dist2d <= config.max_finger_move_distance)
+            {
+                let delta = apply_speed_and_acc(longest_delta, elapsed, &dev_cfg);
+                if config.cursor_averaging > 1 {
+                    self.averaging_x += delta.x;
+                    self.averaging_y += delta.y;
+                    self.averaging_count += 1;
+                    if self.averaging_count >= config.cursor_averaging {
+                        let out = Point::new(self.averaging_x, self.averaging_y);
+                        self.averaging_x = 0.0;
+                        self.averaging_y = 0.0;
+                        self.averaging_count = 0;
                         self.last_contacts = contacts.to_vec();
-                        return Some(delta);
+                        return Some(out);
                     }
+                } else {
+                    self.last_contacts = contacts.to_vec();
+                    return Some(delta);
                 }
             }
-            // restart_release_timer handled by caller
         }
 
         self.last_contacts = contacts.to_vec();
@@ -269,7 +272,12 @@ impl FingerCounter {
         if !are_ids_common || has_released {
             self.short_delay_move = 0.0;
             self.long_delay_move = 0.0;
-            return (0, self.short_delay_count, self.long_delay_count, self.original_count);
+            return (
+                0,
+                self.short_delay_count,
+                self.long_delay_count,
+                self.original_count,
+            );
         }
 
         let dist = apply_speed(longest_dist2d, config);
@@ -310,10 +318,9 @@ fn apply_speed_and_acc(delta: Point, elapsed_ms: u32, dev_cfg: &DeviceConfig) ->
     let mouse_velocity = (d.length() / elapsed_ms.max(1) as f32).min(4.0);
     let a = dev_cfg.cursor_acceleration / 10.0;
     let pointer_velocity = if a != 0.0 {
-        let exp = 2.6 * a
-            * (mouse_velocity
-                - 1.0
-                + (3.0 - ((0.8_f32 / 0.3_f32) - 1.0_f32).log2()) / (2.6 * a))
+        let exp = 2.6
+            * a
+            * (mouse_velocity - 1.0 + (3.0 - ((0.8_f32 / 0.3_f32) - 1.0_f32).log2()) / (2.6 * a))
             - 3.0;
         let k = exp.exp();
         let sigmoid = k / (1.0 + k);
