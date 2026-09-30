@@ -43,10 +43,15 @@ fn main() -> Result<()> {
         config.save(&config_path)?;
     }
 
-    scheduler::sync_startup(config.start_at_boot)?;
+    // A failed startup-task sync must not stop the app from running; the user
+    // may simply not be elevated, and the drag feature is independent of it.
+    if let Err(e) = scheduler::sync_startup(config.start_at_boot) {
+        log::error!("Failed to sync startup task: {e}");
+    }
 
     let hwnd = create_message_window()?;
     TouchpadEngine::register(hwnd)?;
+    info!("Raw input registered for precision touchpad, hwnd={hwnd:?}");
     let tray = Tray::new(hwnd, WM_APP_TRAY)?;
 
     let mut app = AppState {
@@ -92,17 +97,20 @@ fn create_message_window() -> Result<HWND> {
         anyhow::bail!("RegisterClassExW failed");
     }
 
+    // Raw input with RIDEV_INPUTSINK requires a real top-level window; a
+    // message-only window (HWND_MESSAGE) never receives WM_INPUT reports.
+    // Use a hidden top-level window excluded from the taskbar and Alt+Tab.
     unsafe {
         CreateWindowExW(
-            WINDOW_EX_STYLE(0),
+            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             class_name,
             w!("TriDragForIwmei"),
-            WINDOW_STYLE(0),
+            WS_POPUP,
             0,
             0,
             0,
             0,
-            Some(HWND_MESSAGE),
+            None,
             None,
             Some(instance.into()),
             None,
@@ -137,30 +145,30 @@ unsafe extern "system" fn window_proc(
 
 unsafe fn handle_input(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let app = get_app_state(hwnd);
-    if !app.config.enabled {
-        return DefWindowProcW(hwnd, WM_INPUT, WPARAM(lparam.0 as _), lparam);
-    }
+    if app.config.enabled {
+        if let Some(contacts) = app.touchpad.parse_input(lparam.0 as _) {
+            let device_id = app.touchpad.current_device_id();
 
-    if let Some(contacts) = app.touchpad.parse_input(lparam.0 as _) {
-        let device_id = app.touchpad.current_device_id();
-        let mut config = app.config.clone();
-        config.current_device_id = device_id;
-
-        if let Some(delta) = app.touchpad.engine.on_contacts(&contacts, &config) {
-            mouse::send_move(delta.x, delta.y);
-        }
-        match app.touchpad.engine.button_event() {
-            Some(mouse::ButtonEvent::Down) => mouse::send_button_down(app.config.button),
-            Some(mouse::ButtonEvent::Up) => mouse::send_button_up(app.config.button),
-            None => {}
-        }
-        if app.touchpad.engine.is_dragging() {
-            let _ = SetTimer(
-                Some(hwnd),
-                touchpad::RELEASE_TIMER_ID,
-                config.release_delay_ms,
-                None,
-            );
+            if let Some(delta) = app
+                .touchpad
+                .engine
+                .on_contacts(&contacts, &app.config, &device_id)
+            {
+                mouse::send_move(delta.x, delta.y);
+            }
+            match app.touchpad.engine.button_event() {
+                Some(mouse::ButtonEvent::Down) => mouse::send_button_down(app.config.button),
+                Some(mouse::ButtonEvent::Up) => mouse::send_button_up(app.config.button),
+                None => {}
+            }
+            if app.touchpad.engine.is_dragging() {
+                let _ = SetTimer(
+                    Some(hwnd),
+                    touchpad::RELEASE_TIMER_ID,
+                    app.config.release_delay(),
+                    None,
+                );
+            }
         }
     }
     DefWindowProcW(hwnd, WM_INPUT, WPARAM(lparam.0 as _), lparam)

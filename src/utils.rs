@@ -7,6 +7,8 @@ use windows::core::w;
 use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, WIN32_ERROR};
 use windows::Win32::System::Threading::CreateMutexW;
 
+/// Logging level. Kept at Debug for diagnostics; the hot per-report path uses
+/// trace!, so this still produces no steady disk writes during normal use.
 pub fn init_logging() -> Result<()> {
     let log_dir = dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -24,7 +26,6 @@ pub fn single_instance() -> Result<SingleInstanceGuard> {
     unsafe {
         let handle = CreateMutexW(None, true, name)?;
         if GetLastError() == WIN32_ERROR(183) {
-            // ERROR_ALREADY_EXISTS
             CloseHandle(handle)?;
             anyhow::bail!("Another instance is already running");
         }

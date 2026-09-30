@@ -2,9 +2,12 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use log::info;
+use log::{error, info};
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::UI::HiDpi::{
+    SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
 };
@@ -68,6 +71,11 @@ impl Tray {
 
     fn show_menu(&mut self, config: &mut Config, config_path: &Path) {
         unsafe {
+            // Render the menu at the DPI of the monitor the cursor is on. The
+            // returned context is restored once the menu closes so the rest of
+            // the process keeps its default awareness.
+            let previous = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
             let _ = SetForegroundWindow(self.hwnd).ok();
             let menu = CreatePopupMenu().unwrap();
 
@@ -96,6 +104,7 @@ impl Tray {
             )
             .as_bool() as u32;
             let _ = DestroyMenu(menu).ok();
+            SetThreadDpiAwarenessContext(previous);
 
             match cmd {
                 ID_ENABLED => {
@@ -104,10 +113,19 @@ impl Tray {
                     info!("Enabled toggled to {}", config.enabled);
                 }
                 ID_START_BOOT => {
-                    config.start_at_boot = !config.start_at_boot;
-                    let _ = scheduler::sync_startup(config.start_at_boot);
-                    let _ = config.save(config_path);
-                    info!("Start at boot toggled to {}", config.start_at_boot);
+                    let target = !config.start_at_boot;
+                    // Only persist the new value if the task was actually
+                    // updated, so config never drifts from scheduler state.
+                    match scheduler::sync_startup(target) {
+                        Ok(()) => {
+                            config.start_at_boot = target;
+                            let _ = config.save(config_path);
+                            info!("Start at boot toggled to {target}");
+                        }
+                        Err(e) => {
+                            error!("Failed to update startup task: {e}");
+                        }
+                    }
                 }
                 ID_OPEN_CONFIG => {
                     if let Some(parent) = config_path.parent() {

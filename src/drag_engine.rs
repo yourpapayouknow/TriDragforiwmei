@@ -1,12 +1,10 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use log::debug;
+use log::{debug, trace};
 
-use crate::config::{Config, DeviceConfig};
+use crate::config::{Config, DeviceConfig, RELEASE_FINGERS_THRESHOLD_MS};
 use crate::mouse::{ButtonEvent, Point};
-
-const RELEASE_FINGERS_THRESHOLD_MS: u128 = 40;
 
 #[derive(Debug, Clone, Copy)]
 pub struct TouchpadContact {
@@ -50,11 +48,16 @@ impl DragEngine {
         }
     }
 
-    pub fn on_contacts(&mut self, contacts: &[TouchpadContact], config: &Config) -> Option<Point> {
+    pub fn on_contacts(
+        &mut self,
+        contacts: &[TouchpadContact],
+        config: &Config,
+        device_id: &str,
+    ) -> Option<Point> {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_time).as_millis() as u32;
         self.last_time = now;
-        let has_fingers_released = elapsed as u128 > RELEASE_FINGERS_THRESHOLD_MS;
+        let has_fingers_released = elapsed > RELEASE_FINGERS_THRESHOLD_MS;
 
         let are_ids_common = Self::are_ids_common(&self.last_contacts, contacts);
         let (longest_id, longest_delta, longest_dist2d) =
@@ -68,16 +71,13 @@ impl DragEngine {
                 longest_dist2d,
                 has_fingers_released,
                 config,
+                device_id,
             );
 
-        debug!(
-            "fingers={} original={} moving={}/{} dist={} id={}",
-            fingers_count,
-            original_count,
-            short_delay_moving,
-            long_delay_moving,
-            longest_dist2d,
-            longest_id
+        // Per-report logging: kept at trace level so the hot path costs nothing
+        // unless verbose logging is explicitly enabled.
+        trace!(
+            "fingers={fingers_count} original={original_count} moving={short_delay_moving}/{long_delay_moving} dist={longest_dist2d} id={longest_id}"
         );
 
         if fingers_count >= 3
@@ -100,7 +100,7 @@ impl DragEngine {
             && self.is_dragging
             && longest_dist2d > 0.0
         {
-            let dev_cfg = config.device_config(&config.current_device_id);
+            let dev_cfg = config.device_config(device_id);
             if dev_cfg.cursor_move
                 && (config.max_finger_move_distance == 0.0
                     || longest_dist2d <= config.max_finger_move_distance)
@@ -265,6 +265,7 @@ impl FingerCounter {
         longest_dist2d: f32,
         has_released: bool,
         config: &Config,
+        device_id: &str,
     ) -> (i32, i32, i32, i32) {
         if !are_ids_common && (contacts.len() <= 1 || has_released) {
             self.original_count = 0;
@@ -280,7 +281,7 @@ impl FingerCounter {
             );
         }
 
-        let dist = apply_speed(longest_dist2d, config);
+        let dist = apply_speed(longest_dist2d, config, device_id);
         if dist >= 1.0 {
             self.short_delay_move += dist;
             self.long_delay_move += dist;
@@ -307,8 +308,8 @@ impl FingerCounter {
     }
 }
 
-fn apply_speed(distance: f32, config: &Config) -> f32 {
-    distance * (config.device_config("default").cursor_speed / 60.0)
+fn apply_speed(distance: f32, config: &Config, device_id: &str) -> f32 {
+    distance * (config.device_config(device_id).cursor_speed / 60.0)
 }
 
 fn apply_speed_and_acc(delta: Point, elapsed_ms: u32, dev_cfg: &DeviceConfig) -> Point {

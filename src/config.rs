@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 
 const CONFIG_VERSION: i32 = 1;
 
+/// Minimum delay before releasing the drag button, in milliseconds. Windows
+/// Precision Touchpads send contact reports roughly every 10 ms, so anything
+/// shorter cannot distinguish a release from a dropped report.
+pub const RELEASE_FINGERS_THRESHOLD_MS: u32 = 40;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub version: i32,
@@ -21,8 +26,6 @@ pub struct Config {
     pub run_elevated: bool,
     pub start_at_boot: bool,
     pub device_configs: HashMap<String, DeviceConfig>,
-    #[serde(skip)]
-    pub current_device_id: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -55,7 +58,6 @@ impl Default for Config {
             run_elevated: false,
             start_at_boot: false,
             device_configs: HashMap::new(),
-            current_device_id: "default".to_string(),
         }
     }
 }
@@ -71,6 +73,18 @@ impl Default for DeviceConfig {
 }
 
 impl Config {
+    /// Delay before the held button is released when no input arrives.
+    /// Mirrors the reference: honour the configured delay only when
+    /// release-and-restart is enabled, otherwise fall back to the raw
+    /// finger-release threshold.
+    pub fn release_delay(&self) -> u32 {
+        if self.allow_release_and_restart {
+            self.release_delay_ms.max(RELEASE_FINGERS_THRESHOLD_MS)
+        } else {
+            RELEASE_FINGERS_THRESHOLD_MS
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             let cfg = Config::default();

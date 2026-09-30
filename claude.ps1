@@ -1,11 +1,11 @@
 # ===== 基础连接 =====
 $env:ANTHROPIC_BASE_URL = "http://100.121.131.101:8765"
 $env:ANTHROPIC_AUTH_TOKEN = "workbuddy"
-$env:ANTHROPIC_MODEL = "kimi-k2.7"
+$env:ANTHROPIC_MODEL = "deepseek-v4.1-flash"
 
 # ===== 上下文窗口（K2.7 Code 实际为 256K）=====
-$env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = "256000"
-$env:CLAUDE_CODE_AUTO_COMPACT_WINDOW = "256000"
+# $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = "256000"
+# $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW = "256000"
 
 # ===== 自动压缩触发阈值 =====
 $env:CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = "70"

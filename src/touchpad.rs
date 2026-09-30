@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::ptr;
 
 use anyhow::Result;
-use log::debug;
 use windows::Win32::Devices::HumanInterfaceDevice::{
     HidP_GetCaps, HidP_GetUsageValue, HidP_GetValueCaps, HidP_Input, HIDP_STATUS_SUCCESS,
     HIDP_VALUE_CAPS, PHIDP_PREPARSED_DATA,
@@ -20,8 +19,17 @@ pub const RELEASE_TIMER_ID: usize = 1;
 
 pub struct TouchpadEngine {
     pub engine: DragEngine,
-    device_infos: HashMap<isize, TouchpadDeviceInfo>,
+    devices: HashMap<isize, TouchpadDevice>,
     current_device: Option<isize>,
+}
+
+/// Per-device cached data. Preparsed data and value caps never change while a
+/// device stays connected, so they are computed once and reused for every
+/// WM_INPUT instead of being re-queried on each report.
+struct TouchpadDevice {
+    info: TouchpadDeviceInfo,
+    preparsed: PreparsedData,
+    value_caps: Vec<HIDP_VALUE_CAPS>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,7 +45,7 @@ impl TouchpadEngine {
     pub fn new() -> Self {
         Self {
             engine: DragEngine::new(),
-            device_infos: HashMap::new(),
+            devices: HashMap::new(),
             current_device: None,
         }
     }
@@ -57,28 +65,59 @@ impl TouchpadEngine {
     }
 
     pub fn on_device_change(&mut self, _hdev: HANDLE) {
-        // Re-enumerate devices if needed; raw input registration already captures WM_INPUT.
+        // A device was added or removed: drop cached caps so the next report
+        // re-queries them against the current device set.
+        self.devices.clear();
+        self.current_device = None;
     }
 
     pub fn parse_input(&mut self, lparam: isize) -> Option<Vec<TouchpadContact>> {
         unsafe {
-            let raw_input = self.read_raw_input(lparam)?;
-            let hdevice = raw_input.header.hDevice.0 as isize;
+            let buf = self.read_raw_input(lparam)?;
+            let raw = ptr::read(buf.as_ptr() as *const RAWINPUT);
+
+            let hdevice = raw.header.hDevice.0 as isize;
             self.current_device = Some(hdevice);
 
-            if let Some(info) = self.fetch_device_info(hdevice) {
-                self.device_infos.insert(hdevice, info);
+            if !self.devices.contains_key(&hdevice) {
+                self.cache_device(hdevice, raw.header.hDevice)?;
             }
 
-            let preparsed = self.fetch_preparse_data(raw_input.header.hDevice)?;
-            let contacts = self.parse_contacts(&raw_input, &preparsed)?;
+            let hid = raw.data.hid;
+            let hid_len = (hid.dwSizeHid * hid.dwCount) as usize;
+            let hid_offset = buf.len() - hid_len;
+            let hid_data = &buf[hid_offset..];
 
-            debug!("Parsed contacts: {:?}", contacts);
+            let device = self.devices.get(&hdevice)?;
+            let contacts = self.parse_contacts(
+                hid_data,
+                hid.dwSizeHid,
+                hid.dwCount,
+                &device.preparsed,
+                &device.value_caps,
+            )?;
+
             Some(contacts)
         }
     }
 
-    unsafe fn read_raw_input(&self, lparam: isize) -> Option<RAWINPUT> {
+    /// Fetches device info, preparsed data and value caps once per device.
+    unsafe fn cache_device(&mut self, hdevice: isize, handle: HANDLE) -> Option<()> {
+        let info = self.fetch_device_info(hdevice)?;
+        let preparsed = self.fetch_preparse_data(handle)?;
+        let value_caps = query_value_caps(&preparsed)?;
+        self.devices.insert(
+            hdevice,
+            TouchpadDevice {
+                info,
+                preparsed,
+                value_caps,
+            },
+        );
+        Some(())
+    }
+
+    unsafe fn read_raw_input(&self, lparam: isize) -> Option<Vec<u8>> {
         let mut size = 0u32;
         let header_size = std::mem::size_of::<RAWINPUTHEADER>() as u32;
         if GetRawInputData(
@@ -87,7 +126,7 @@ impl TouchpadEngine {
             None,
             &mut size,
             header_size,
-        ) == u32::MAX
+        ) != 0
         {
             return None;
         }
@@ -96,18 +135,19 @@ impl TouchpadEngine {
         }
 
         let mut buf = vec![0u8; size as usize];
+        let mut filled = size;
         if GetRawInputData(
             HRAWINPUT(lparam as _),
             RID_INPUT,
             Some(buf.as_mut_ptr() as _),
-            &mut size,
+            &mut filled,
             header_size,
         ) != size
         {
             return None;
         }
 
-        Some(ptr::read(buf.as_ptr() as *const RAWINPUT))
+        Some(buf)
     }
 
     unsafe fn fetch_preparse_data(&self, hdevice: HANDLE) -> Option<PreparsedData> {
@@ -130,44 +170,31 @@ impl TouchpadEngine {
 
     unsafe fn parse_contacts(
         &self,
-        raw: &RAWINPUT,
+        raw_data: &[u8],
+        hid_size: u32,
+        hid_count: u32,
         preparsed: &PreparsedData,
+        value_caps: &[HIDP_VALUE_CAPS],
     ) -> Option<Vec<TouchpadContact>> {
         let preparsed_ptr = PHIDP_PREPARSED_DATA(preparsed.0.as_ptr() as isize);
-
-        let mut caps = std::mem::zeroed();
-        if HidP_GetCaps(preparsed_ptr, &mut caps) != HIDP_STATUS_SUCCESS {
-            return None;
-        }
-
-        let mut value_caps_len = caps.NumberInputValueCaps;
-        if value_caps_len == 0 {
-            return None;
-        }
-        let mut value_caps = vec![std::mem::zeroed::<HIDP_VALUE_CAPS>(); value_caps_len as usize];
-        if HidP_GetValueCaps(
-            HidP_Input,
-            value_caps.as_mut_ptr(),
-            &mut value_caps_len,
-            preparsed_ptr,
-        ) != HIDP_STATUS_SUCCESS
-        {
-            return None;
-        }
-        value_caps.truncate(value_caps_len as usize);
-
-        let hid = raw.data.hid;
-        let total_bytes = (hid.dwSizeHid * hid.dwCount) as usize;
-        let raw_data = self.raw_hid_data(raw, total_bytes)?;
 
         let mut contact_count = 0u32;
         let mut creators: Vec<TouchpadContactBuilder> = Vec::new();
         let mut contacts: Vec<TouchpadContact> = Vec::new();
 
-        for cap in &value_caps {
+        for cap in value_caps {
             let usage = unsafe { cap.Anonymous.NotRange.Usage };
-            for idx in 0..hid.dwCount {
-                let report = &raw_data[(hid.dwSizeHid * idx) as usize..][..total_bytes];
+
+            // Each HID report is `hid_size` bytes; a raw input may carry several.
+            // Mirror the reference: pass the whole buffer as the report and let
+            // HidP_GetUsageValue read at the per-contact offset.
+            for contact_index in 0..hid_count {
+                let offset = (hid_size * contact_index) as usize;
+                if offset >= raw_data.len() {
+                    continue;
+                }
+                let report = &raw_data[offset..];
+
                 let mut value = 0u32;
                 if HidP_GetUsageValue(
                     HidP_Input,
@@ -187,18 +214,19 @@ impl TouchpadEngine {
                         contact_count = value;
                     }
                 } else {
-                    while creators.len() <= idx as usize {
+                    while creators.len() <= contact_index as usize {
                         creators.push(TouchpadContactBuilder::default());
                     }
                     match (cap.UsagePage, usage) {
-                        (0x0D, 0x51) => creators[idx as usize].id = Some(value as i32),
-                        (0x01, 0x30) => creators[idx as usize].x = Some(value as i32),
-                        (0x01, 0x31) => creators[idx as usize].y = Some(value as i32),
+                        (0x0D, 0x51) => creators[contact_index as usize].id = Some(value as i32),
+                        (0x01, 0x30) => creators[contact_index as usize].x = Some(value as i32),
+                        (0x01, 0x31) => creators[contact_index as usize].y = Some(value as i32),
                         _ => {}
                     }
                 }
             }
 
+            // Collect any contact that now has id/x/y filled.
             for creator in &mut creators {
                 if let Some(c) = creator.build() {
                     if contact_count == 0 || contacts.len() < contact_count as usize {
@@ -213,24 +241,6 @@ impl TouchpadEngine {
         }
 
         Some(contacts)
-    }
-
-    unsafe fn raw_hid_data(&self, raw: &RAWINPUT, total_bytes: usize) -> Option<Vec<u8>> {
-        let raw_size = (raw.data.hid.dwSizeHid * raw.data.hid.dwCount) as usize;
-        let buf_size = std::mem::size_of::<RAWINPUTHEADER>() + raw_size;
-        let mut buf = vec![0u8; buf_size];
-        let header_size = std::mem::size_of::<RAWINPUTHEADER>() as u32;
-        if GetRawInputData(
-            HRAWINPUT(raw.header.hDevice.0 as _),
-            RID_INPUT,
-            Some(buf.as_mut_ptr() as _),
-            &mut (buf_size as u32),
-            header_size,
-        ) != buf_size as u32
-        {
-            return None;
-        }
-        Some(buf[buf_size - total_bytes..].to_vec())
     }
 
     fn fetch_device_info(&self, hdev: isize) -> Option<TouchpadDeviceInfo> {
@@ -270,10 +280,41 @@ impl TouchpadEngine {
 
     pub fn current_device_id(&self) -> String {
         self.current_device
-            .and_then(|h| self.device_infos.get(&h))
-            .map(|i| i.device_id.clone())
+            .and_then(|h| self.devices.get(&h))
+            .map(|d| d.info.device_id.clone())
             .unwrap_or_else(|| "default".to_string())
     }
+}
+
+/// Reads the device's input value caps, sorted so collection 0 (contact count)
+/// is processed before the per-contact collections.
+unsafe fn query_value_caps(preparsed: &PreparsedData) -> Option<Vec<HIDP_VALUE_CAPS>> {
+    let preparsed_ptr = PHIDP_PREPARSED_DATA(preparsed.0.as_ptr() as isize);
+
+    let mut caps = std::mem::zeroed();
+    if HidP_GetCaps(preparsed_ptr, &mut caps) != HIDP_STATUS_SUCCESS {
+        return None;
+    }
+
+    let mut value_caps_len = caps.NumberInputValueCaps;
+    if value_caps_len == 0 {
+        return None;
+    }
+
+    let mut value_caps = vec![std::mem::zeroed::<HIDP_VALUE_CAPS>(); value_caps_len as usize];
+    if HidP_GetValueCaps(
+        HidP_Input,
+        value_caps.as_mut_ptr(),
+        &mut value_caps_len,
+        preparsed_ptr,
+    ) != HIDP_STATUS_SUCCESS
+    {
+        return None;
+    }
+    value_caps.truncate(value_caps_len as usize);
+    value_caps.sort_by_key(|c| c.LinkCollection);
+
+    Some(value_caps)
 }
 
 struct PreparsedData(Vec<u8>);
