@@ -1,6 +1,5 @@
 use std::env;
 use std::path::PathBuf;
-use std::process::Command;
 use std::ptr;
 
 use anyhow::{Context, Result};
@@ -8,8 +7,6 @@ use log::info;
 use windows::core::w;
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::GetCurrentProcessId;
-use windows::Win32::UI::Shell::IsUserAnAdmin;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 mod config;
@@ -27,25 +24,23 @@ use tray::Tray;
 const WM_APP_TRAY: u32 = WM_APP + 1;
 
 fn main() -> Result<()> {
+    // Helpers run once, do their task and exit; they deliberately skip the
+    // single-instance guard and the tray so the running instance is untouched.
+    if let Some(mode) = helper_mode() {
+        utils::init_logging()?;
+        return run_helper(mode);
+    }
+
     let _single = utils::single_instance()?;
     utils::init_logging()?;
     info!("Starting tridragforiwmei");
 
     let config_path = config::config_path()?;
-    let mut config = Config::load(&config_path)?;
-
-    if config.run_elevated && !is_admin() {
-        if restart_elevated().is_ok() {
-            return Ok(());
-        }
-        log::error!("Failed to restart elevated; continuing unelevated");
-        config.run_elevated = false;
-        config.save(&config_path)?;
-    }
+    let config = Config::load(&config_path)?;
 
     // A failed startup-task sync must not stop the app from running; the user
     // may simply not be elevated, and the drag feature is independent of it.
-    if let Err(e) = scheduler::sync_startup(config.start_at_boot) {
+    if let Err(e) = scheduler::set_startup(config.start_at_boot) {
         log::error!("Failed to sync startup task: {e}");
     }
 
@@ -210,23 +205,27 @@ unsafe fn get_app_state(hwnd: HWND) -> &'static mut AppState {
     &mut *(ptr as *mut AppState)
 }
 
-fn is_admin() -> bool {
-    unsafe { IsUserAnAdmin().into() }
+/// Helper invocations used to run privileged setup from an unelevated process.
+#[derive(Clone, Copy)]
+enum Helper {
+    EnableStartup,
+    DisableStartup,
 }
 
-fn restart_elevated() -> Result<()> {
-    let exe = env::current_exe().context("current_exe")?;
-    let pid = unsafe { GetCurrentProcessId() };
-    let mut cmd = Command::new("powershell.exe");
-    cmd.arg("-NoProfile")
-        .arg("-WindowStyle")
-        .arg("Hidden")
-        .arg("-Command")
-        .arg(format!(
-            "Start-Process -FilePath '{}' -Verb runas -ArgumentList '--elevated {}';",
-            exe.display(),
-            pid
-        ));
-    cmd.spawn().context("spawn elevator")?;
-    Ok(())
+fn helper_mode() -> Option<Helper> {
+    env::args().skip(1).find_map(|arg| match arg.as_str() {
+        "--task-enable" => Some(Helper::EnableStartup),
+        "--task-disable" => Some(Helper::DisableStartup),
+        _ => None,
+    })
+}
+
+fn run_helper(mode: Helper) -> Result<()> {
+    let enabled = matches!(mode, Helper::EnableStartup);
+    let result = scheduler::set_startup(enabled);
+    match &result {
+        Ok(()) => info!("Helper set startup task enabled={enabled}"),
+        Err(e) => log::error!("Helper failed to set startup task: {e}"),
+    }
+    result
 }

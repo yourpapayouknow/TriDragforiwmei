@@ -15,11 +15,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos, InsertMenuW, LoadIconW,
     PostQuitMessage, SetForegroundWindow, TrackPopupMenu, HICON, HMENU, IDI_APPLICATION,
     MF_BYPOSITION, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_LEFTALIGN, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_LBUTTONUP, WM_RBUTTONUP,
 };
 
 use crate::config::Config;
 use crate::scheduler;
+use crate::utils;
 
 pub struct Tray {
     hwnd: HWND,
@@ -59,12 +60,11 @@ impl Tray {
         config: &mut Config,
         config_path: &Path,
     ) {
-        let event = lparam.0 as u32;
+        // The low word of lParam carries the mouse message; the high word holds
+        // the icon id, so mask it off before matching.
+        let event = (lparam.0 as u32) & 0xFFFF;
         match event {
-            0x0204 | 0x0205 => {
-                // WM_RBUTTONUP or WM_LBUTTONUP
-                self.show_menu(config, config_path);
-            }
+            WM_LBUTTONUP | WM_RBUTTONUP => self.show_menu(config, config_path),
             _ => {}
         }
     }
@@ -93,6 +93,9 @@ impl Tray {
 
             let mut pt = Default::default();
             let _ = GetCursorPos(&mut pt).ok();
+            // With TPM_RETURNCMD the return value is the selected command id,
+            // not a boolean. Read the raw value: .as_bool() would collapse
+            // every non-zero id to 1 and make all items look like ID_ENABLED.
             let cmd = TrackPopupMenu(
                 menu,
                 TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN,
@@ -102,7 +105,7 @@ impl Tray {
                 self.hwnd,
                 None,
             )
-            .as_bool() as u32;
+            .0 as u32;
             let _ = DestroyMenu(menu).ok();
             SetThreadDpiAwarenessContext(previous);
 
@@ -114,17 +117,27 @@ impl Tray {
                 }
                 ID_START_BOOT => {
                     let target = !config.start_at_boot;
-                    // Only persist the new value if the task was actually
-                    // updated, so config never drifts from scheduler state.
-                    match scheduler::sync_startup(target) {
+                    // Registering a HighestAvailable logon task needs admin
+                    // rights. When unelevated, hand off to an elevated child
+                    // running this same binary with a helper flag; it performs
+                    // the change and the config is only persisted on success.
+                    let result = if utils::is_admin() {
+                        scheduler::set_startup(target)
+                    } else {
+                        let flag = if target {
+                            "--task-enable"
+                        } else {
+                            "--task-disable"
+                        };
+                        utils::run_elevated(flag)
+                    };
+                    match result {
                         Ok(()) => {
                             config.start_at_boot = target;
                             let _ = config.save(config_path);
                             info!("Start at boot toggled to {target}");
                         }
-                        Err(e) => {
-                            error!("Failed to update startup task: {e}");
-                        }
+                        Err(e) => error!("Failed to update startup task: {e}"),
                     }
                 }
                 ID_OPEN_CONFIG => {

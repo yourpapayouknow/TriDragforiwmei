@@ -21,7 +21,7 @@ pub fn is_startup_enabled() -> bool {
 
 /// Brings the startup task in line with `enabled`, doing nothing when it is
 /// already in the desired state so unrelated tasks are never touched.
-pub fn sync_startup(enabled: bool) -> Result<()> {
+pub fn set_startup(enabled: bool) -> Result<()> {
     if enabled == is_startup_enabled() {
         return Ok(());
     }
@@ -35,7 +35,7 @@ pub fn sync_startup(enabled: bool) -> Result<()> {
 fn enable_startup() -> Result<()> {
     let exe = std::env::current_exe().context("current_exe")?;
     let exe_str = exe.to_string_lossy();
-    let user = std::env::var("USERNAME").context("USERNAME not set")?;
+    let user = crate::utils::current_user_sid().context("resolve current user SID")?;
 
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
