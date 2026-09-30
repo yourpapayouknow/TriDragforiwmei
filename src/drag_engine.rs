@@ -3,158 +3,143 @@ use std::time::{Duration, Instant};
 
 use log::{debug, trace};
 
-use crate::config::{Config, DeviceConfig, RELEASE_FINGERS_THRESHOLD_MS};
-use crate::mouse::{ButtonEvent, Point};
+use crate::config::{Config, DevCfg, RLS_FNG_THR_MS};
+use crate::mouse::{BtEv, Point};
 
+/// A single touchpad contact with its identifier and coordinates.
 #[derive(Debug, Clone, Copy)]
-pub struct TouchpadContact {
+pub struct TpCtc {
     pub id: i32,
     pub x: i32,
     pub y: i32,
 }
 
-impl TouchpadContact {
-    pub fn dist2d(&self, other: &Self) -> f32 {
+impl TpCtc {
+    /// Euclidean distance to another contact.
+    pub fn getdst2d(&self, other: &Self) -> f32 {
         let dx = (other.x - self.x) as f32;
         let dy = (other.y - self.y) as f32;
         (dx * dx + dy * dy).sqrt()
     }
 }
 
-pub struct DragEngine {
-    is_dragging: bool,
-    distance_manager: DistanceManager,
-    finger_counter: FingerCounter,
-    last_contacts: Vec<TouchpadContact>,
-    last_time: Instant,
-    averaging_x: f32,
-    averaging_y: f32,
-    averaging_count: u32,
-    pending_button: Option<ButtonEvent>,
+/// Recognises three-finger drags and reports the resulting cursor motion and
+/// button edges.
+pub struct DrgEng {
+    isdrgging: bool,
+    dstmgr: DstMgr,
+    fngcnt: FngCnt,
+    lastctc: Vec<TpCtc>,
+    lasttime: Instant,
+    avgx: f32,
+    avgy: f32,
+    avgcnt: u32,
+    pendbtn: Option<BtEv>,
 }
 
-impl DragEngine {
+impl DrgEng {
+    /// Creates an engine with no contacts seen yet.
     pub fn new() -> Self {
         Self {
-            is_dragging: false,
-            distance_manager: DistanceManager::new(),
-            finger_counter: FingerCounter::new(),
-            last_contacts: Vec::new(),
-            last_time: Instant::now(),
-            averaging_x: 0.0,
-            averaging_y: 0.0,
-            averaging_count: 0,
-            pending_button: None,
+            isdrgging: false,
+            dstmgr: DstMgr::new(),
+            fngcnt: FngCnt::new(),
+            lastctc: Vec::new(),
+            lasttime: Instant::now(),
+            avgx: 0.0,
+            avgy: 0.0,
+            avgcnt: 0,
+            pendbtn: None,
         }
     }
 
-    pub fn on_contacts(
-        &mut self,
-        contacts: &[TouchpadContact],
-        config: &Config,
-        device_id: &str,
-    ) -> Option<Point> {
+    /// Advances the state machine with one contact report, returning the cursor
+    /// offset to apply when a drag is in progress.
+    pub fn onctc(&mut self, ctc: &[TpCtc], config: &Config, devid: &str) -> Option<Point> {
         let now = Instant::now();
-        let elapsed = now.duration_since(self.last_time).as_millis() as u32;
-        self.last_time = now;
-        let has_fingers_released = elapsed > RELEASE_FINGERS_THRESHOLD_MS;
+        let elapsed = now.duration_since(self.lasttime).as_millis() as u32;
+        self.lasttime = now;
+        let released = elapsed > RLS_FNG_THR_MS;
 
-        let are_ids_common = Self::are_ids_common(&self.last_contacts, contacts);
-        let (longest_id, longest_delta, longest_dist2d) =
-            self.distance_manager
-                .longest(&self.last_contacts, contacts, has_fingers_released);
+        let idscommon = Self::areidscmn(&self.lastctc, ctc);
+        let (longid, longdelta, longdist) = self.dstmgr.longest(&self.lastctc, ctc, released);
 
-        let (fingers_count, short_delay_moving, long_delay_moving, original_count) =
-            self.finger_counter.count(
-                contacts,
-                are_ids_common,
-                longest_dist2d,
-                has_fingers_released,
-                config,
-                device_id,
-            );
+        let (fngcnt, shortmv, longmv, origcnt) = self
+            .fngcnt
+            .count(ctc, idscommon, longdist, released, config, devid);
 
-        // Per-report logging: kept at trace level so the hot path costs nothing
-        // unless verbose logging is explicitly enabled.
         trace!(
-            "fingers={fingers_count} original={original_count} moving={short_delay_moving}/{long_delay_moving} dist={longest_dist2d} id={longest_id}"
+            "fingers={fngcnt} original={origcnt} moving={shortmv}/{longmv} dist={longdist} id={longid}"
         );
 
-        if fingers_count >= 3
-            && are_ids_common
-            && long_delay_moving == 3
-            && original_count == 3
-            && !self.is_dragging
-        {
-            self.is_dragging = true;
-            self.pending_button = Some(ButtonEvent::Down);
+        if fngcnt >= 3 && idscommon && longmv == 3 && origcnt == 3 && !self.isdrgging {
+            self.isdrgging = true;
+            self.pendbtn = Some(BtEv::Down);
             debug!("START DRAG");
-        } else if self.is_dragging
-            && (short_delay_moving < 2 || (original_count != 3 && original_count >= 2))
-        {
+        } else if self.isdrgging && (shortmv < 2 || (origcnt != 3 && origcnt >= 2)) {
             debug!("STOP DRAG");
-            self.stop_drag();
-        } else if fingers_count >= 2
-            && original_count == 3
-            && are_ids_common
-            && self.is_dragging
-            && longest_dist2d > 0.0
-        {
-            let dev_cfg = config.device_config(device_id);
-            if dev_cfg.cursor_move
+            self.stopdrg();
+        } else if fngcnt >= 2 && origcnt == 3 && idscommon && self.isdrgging && longdist > 0.0 {
+            let devcfg = config.devcfg(devid);
+            if devcfg.cursor_move
                 && (config.max_finger_move_distance == 0.0
-                    || longest_dist2d <= config.max_finger_move_distance)
+                    || longdist <= config.max_finger_move_distance)
             {
-                let delta = apply_speed_and_acc(longest_delta, elapsed, &dev_cfg);
+                let delta = aplspdacc(longdelta, elapsed, &devcfg);
                 if config.cursor_averaging > 1 {
-                    self.averaging_x += delta.x;
-                    self.averaging_y += delta.y;
-                    self.averaging_count += 1;
-                    if self.averaging_count >= config.cursor_averaging {
-                        let out = Point::new(self.averaging_x, self.averaging_y);
-                        self.averaging_x = 0.0;
-                        self.averaging_y = 0.0;
-                        self.averaging_count = 0;
-                        self.last_contacts = contacts.to_vec();
+                    self.avgx += delta.x;
+                    self.avgy += delta.y;
+                    self.avgcnt += 1;
+                    if self.avgcnt >= config.cursor_averaging {
+                        let out = Point::new(self.avgx, self.avgy);
+                        self.avgx = 0.0;
+                        self.avgy = 0.0;
+                        self.avgcnt = 0;
+                        self.lastctc = ctc.to_vec();
                         return Some(out);
                     }
                 } else {
-                    self.last_contacts = contacts.to_vec();
+                    self.lastctc = ctc.to_vec();
                     return Some(delta);
                 }
             }
         }
 
-        self.last_contacts = contacts.to_vec();
+        self.lastctc = ctc.to_vec();
         None
     }
 
-    pub fn button_event(&mut self) -> Option<ButtonEvent> {
-        self.pending_button.take()
+    /// Takes the pending button edge, if any, for the caller to emit.
+    pub fn btnevnt(&mut self) -> Option<BtEv> {
+        self.pendbtn.take()
     }
 
-    pub fn is_dragging(&self) -> bool {
-        self.is_dragging
+    /// Whether a drag is currently held.
+    pub fn isdrgging(&self) -> bool {
+        self.isdrgging
     }
 
-    pub fn on_release_timer(&mut self) {
-        if self.is_dragging {
+    /// Ends the drag when the release timer fires.
+    pub fn onrltmr(&mut self) {
+        if self.isdrgging {
             debug!("STOP DRAG from timer");
-            self.stop_drag();
+            self.stopdrg();
         }
     }
 
-    fn stop_drag(&mut self) {
-        self.is_dragging = false;
-        self.pending_button = Some(ButtonEvent::Up);
-        self.distance_manager.reset();
-        self.finger_counter.reset();
-        self.averaging_x = 0.0;
-        self.averaging_y = 0.0;
-        self.averaging_count = 0;
+    /// Clears drag state and queues the button release.
+    fn stopdrg(&mut self) {
+        self.isdrgging = false;
+        self.pendbtn = Some(BtEv::Up);
+        self.dstmgr.reset();
+        self.fngcnt.reset();
+        self.avgx = 0.0;
+        self.avgy = 0.0;
+        self.avgcnt = 0;
     }
 
-    fn are_ids_common(a: &[TouchpadContact], b: &[TouchpadContact]) -> bool {
+    /// Whether two contact lists describe the same set of contact identifiers.
+    fn areidscmn(a: &[TpCtc], b: &[TpCtc]) -> bool {
         if a.len() != b.len() {
             return false;
         }
@@ -162,12 +147,15 @@ impl DragEngine {
     }
 }
 
-struct DistanceManager {
+/// Tracks which contacts have settled long enough to be measured, and the
+/// longest movement seen between the old and new reports.
+struct DstMgr {
     quarantine: HashMap<i32, Instant>,
     trusted: Vec<i32>,
 }
 
-impl DistanceManager {
+impl DstMgr {
+    /// Creates an empty tracker.
     fn new() -> Self {
         Self {
             quarantine: HashMap::new(),
@@ -175,18 +163,16 @@ impl DistanceManager {
         }
     }
 
+    /// Forgets all contacts, e.g. after the fingers were lifted.
     fn reset(&mut self) {
         self.quarantine.clear();
         self.trusted.clear();
     }
 
-    fn longest(
-        &mut self,
-        old: &[TouchpadContact],
-        new: &[TouchpadContact],
-        has_released: bool,
-    ) -> (i32, Point, f32) {
-        if has_released {
+    /// Returns the identifier, offset and 2D distance of the contact that moved
+    /// furthest, ignoring contacts still inside the settle window.
+    fn longest(&mut self, old: &[TpCtc], new: &[TpCtc], released: bool) -> (i32, Point, f32) {
+        if released {
             self.reset();
             return (0, Point::default(), 0.0);
         }
@@ -197,7 +183,7 @@ impl DistanceManager {
 
         for c in new {
             if let Some(t) = self.quarantine.get(&c.id) {
-                if t.elapsed() > Duration::from_millis(RELEASE_FINGERS_THRESHOLD_MS as u64) {
+                if t.elapsed() > Duration::from_millis(RLS_FNG_THR_MS as u64) {
                     self.trusted.push(c.id);
                     self.quarantine.remove(&c.id);
                 }
@@ -206,9 +192,9 @@ impl DistanceManager {
             }
         }
 
-        let mut longest_id = 0;
-        let mut longest_delta = Point::default();
-        let mut longest_dist = 0.0f32;
+        let mut longid = 0;
+        let mut longdelta = Point::default();
+        let mut longdist = 0.0f32;
 
         for nc in new {
             if !self.trusted.contains(&nc.id) {
@@ -218,118 +204,114 @@ impl DistanceManager {
                 if nc.id != oc.id {
                     continue;
                 }
-                let d = nc.dist2d(oc);
-                if d > longest_dist {
-                    longest_dist = d;
-                    longest_id = nc.id;
-                    longest_delta = Point::new((nc.x - oc.x) as f32, (nc.y - oc.y) as f32);
+                let d = nc.getdst2d(oc);
+                if d > longdist {
+                    longdist = d;
+                    longid = nc.id;
+                    longdelta = Point::new((nc.x - oc.x) as f32, (nc.y - oc.y) as f32);
                 }
                 break;
             }
         }
-        (longest_id, longest_delta, longest_dist)
+        (longid, longdelta, longdist)
     }
 }
 
-struct FingerCounter {
-    original_count: i32,
-    short_delay_move: f32,
-    long_delay_move: f32,
-    short_delay_count: i32,
-    long_delay_count: i32,
+/// Counts moving fingers over a short and a long movement window, which
+/// separates an accidental brush from an intended three-finger drag.
+struct FngCnt {
+    origcnt: i32,
+    shortmv: f32,
+    longmv: f32,
+    shortcnt: i32,
+    longcnt: i32,
 }
 
-impl FingerCounter {
+impl FngCnt {
+    /// Creates a counter with all windows empty.
     fn new() -> Self {
         Self {
-            original_count: 0,
-            short_delay_move: 0.0,
-            long_delay_move: 0.0,
-            short_delay_count: 0,
-            long_delay_count: 0,
+            origcnt: 0,
+            shortmv: 0.0,
+            longmv: 0.0,
+            shortcnt: 0,
+            longcnt: 0,
         }
     }
 
+    /// Clears all counters.
     fn reset(&mut self) {
-        self.original_count = 0;
-        self.short_delay_move = 0.0;
-        self.long_delay_move = 0.0;
-        self.short_delay_count = 0;
-        self.long_delay_count = 0;
+        self.origcnt = 0;
+        self.shortmv = 0.0;
+        self.longmv = 0.0;
+        self.shortcnt = 0;
+        self.longcnt = 0;
     }
 
+    /// Accumulates movement and returns (fingers on pad, short-delay moving
+    /// count, long-delay moving count, original finger count).
     fn count(
         &mut self,
-        contacts: &[TouchpadContact],
-        are_ids_common: bool,
-        longest_dist2d: f32,
-        has_released: bool,
+        ctc: &[TpCtc],
+        idscommon: bool,
+        longdist: f32,
+        released: bool,
         config: &Config,
-        device_id: &str,
+        devid: &str,
     ) -> (i32, i32, i32, i32) {
-        if !are_ids_common && (contacts.len() <= 1 || has_released) {
-            self.original_count = 0;
+        if !idscommon && (ctc.len() <= 1 || released) {
+            self.origcnt = 0;
         }
-        if !are_ids_common || has_released {
-            self.short_delay_move = 0.0;
-            self.long_delay_move = 0.0;
-            return (
-                0,
-                self.short_delay_count,
-                self.long_delay_count,
-                self.original_count,
-            );
+        if !idscommon || released {
+            self.shortmv = 0.0;
+            self.longmv = 0.0;
+            return (0, self.shortcnt, self.longcnt, self.origcnt);
         }
 
-        let dist = apply_speed(longest_dist2d, config, device_id);
+        let dist = aplspd(longdist, config, devid);
         if dist >= 1.0 {
-            self.short_delay_move += dist;
-            self.long_delay_move += dist;
+            self.shortmv += dist;
+            self.longmv += dist;
         }
 
-        if self.short_delay_move >= config.stop_threshold {
-            self.short_delay_count = contacts.len() as i32;
-            self.short_delay_move = 0.0;
+        if self.shortmv >= config.stop_threshold {
+            self.shortcnt = ctc.len() as i32;
+            self.shortmv = 0.0;
         }
-        if self.long_delay_move > config.start_threshold {
-            self.long_delay_count = contacts.len() as i32;
-            self.long_delay_move = 0.0;
-            if self.original_count <= 1 {
-                self.original_count = contacts.len() as i32;
+        if self.longmv > config.start_threshold {
+            self.longcnt = ctc.len() as i32;
+            self.longmv = 0.0;
+            if self.origcnt <= 1 {
+                self.origcnt = ctc.len() as i32;
             }
         }
 
-        (
-            contacts.len() as i32,
-            self.short_delay_count,
-            self.long_delay_count,
-            self.original_count,
-        )
+        (ctc.len() as i32, self.shortcnt, self.longcnt, self.origcnt)
     }
 }
 
-fn apply_speed(distance: f32, config: &Config, device_id: &str) -> f32 {
-    distance * (config.device_config(device_id).cursor_speed / 60.0)
+/// Scales a distance by the device cursor speed for threshold accumulation.
+fn aplspd(distance: f32, config: &Config, devid: &str) -> f32 {
+    distance * (config.devcfg(devid).cursor_speed / 60.0)
 }
 
-fn apply_speed_and_acc(delta: Point, elapsed_ms: u32, dev_cfg: &DeviceConfig) -> Point {
+/// Scales a drag offset by the device speed and the acceleration curve.
+fn aplspdacc(delta: Point, elapsed_ms: u32, devcfg: &DevCfg) -> Point {
     let mut d = delta;
-    d.multiply(dev_cfg.cursor_speed / 120.0);
+    d.multiply(devcfg.cursor_speed / 120.0);
 
-    let mouse_velocity = (d.length() / elapsed_ms.max(1) as f32).min(4.0);
-    let a = dev_cfg.cursor_acceleration / 10.0;
-    let pointer_velocity = if a != 0.0 {
-        let exp = 2.6
-            * a
-            * (mouse_velocity - 1.0 + (3.0 - ((0.8_f32 / 0.3_f32) - 1.0_f32).log2()) / (2.6 * a))
-            - 3.0;
+    let mousevel = (d.length() / elapsed_ms.max(1) as f32).min(4.0);
+    let a = devcfg.cursor_acceleration / 10.0;
+    let ptrvel = if a != 0.0 {
+        let exp =
+            2.6 * a * (mousevel - 1.0 + (3.0 - ((0.8_f32 / 0.3_f32) - 1.0_f32).log2()) / (2.6 * a))
+                - 3.0;
         let k = exp.exp();
-        let sigmoid = k / (1.0 + k);
-        0.7 + 0.8 * sigmoid
+        0.7 + 0.8 * (k / (1.0 + k))
     } else {
         1.0
     };
 
-    d.multiply(pointer_velocity);
+    d.multiply(ptrvel);
     d
 }

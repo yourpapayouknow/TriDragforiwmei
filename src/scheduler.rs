@@ -1,41 +1,47 @@
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use log::info;
 
-const TASK_NAME: &str = "TriDragForIwmeiStartup";
-const TASK_FOLDER: &str = "\\TriDragForIwmei";
+/// Registered name and folder of the logon task.
+const TSKNAME: &str = "TriDragForIwmeiStartup";
+const TSKFOLDER: &str = "\\TriDragForIwmei";
 
-fn task_path() -> String {
-    format!("{TASK_FOLDER}\\{TASK_NAME}")
+/// Full task path used by schtasks.
+fn tskpath() -> String {
+    format!("{TSKFOLDER}\\{TSKNAME}")
 }
 
-/// Current state of the startup task.
-pub fn is_startup_enabled() -> bool {
+/// Whether the logon task is currently registered.
+pub fn isstpenb() -> bool {
     Command::new("schtasks.exe")
-        .args(["/Query", "/TN", &task_path()])
+        .args(["/Query", "/TN", &tskpath()])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
-/// Brings the startup task in line with `enabled`, doing nothing when it is
-/// already in the desired state so unrelated tasks are never touched.
-pub fn set_startup(enabled: bool) -> Result<()> {
-    if enabled == is_startup_enabled() {
+/// Brings the logon task in line with `enabled`, doing nothing when it already
+/// matches so unrelated tasks are never touched.
+pub fn setstp(enabled: bool) -> Result<()> {
+    if enabled == isstpenb() {
         return Ok(());
     }
     if enabled {
-        enable_startup()
+        enbstartup()
     } else {
-        disable_startup()
+        dsbstartup()
     }
 }
 
-fn enable_startup() -> Result<()> {
+/// Registers the logon task that relaunches this executable after sign-in.
+fn enbstartup() -> Result<()> {
     let exe = std::env::current_exe().context("current_exe")?;
-    let exe_str = exe.to_string_lossy();
-    let user = crate::utils::current_user_sid().context("resolve current user SID")?;
+    let exestr = exe.to_string_lossy();
+    // A SID is used rather than a user name because names containing spaces or
+    // non-ASCII characters fail the account lookup.
+    let user = crate::utils::curusrsid().context("resolve current user SID")?;
 
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
@@ -72,20 +78,20 @@ fn enable_startup() -> Result<()> {
     </Exec>
   </Actions>
 </Task>"#,
-        user = xml_escape(&user),
-        command = xml_escape(&exe_str)
+        user = xmlescp(&user),
+        command = xmlescp(&exestr)
     );
 
-    // schtasks expects a UTF-16 file for /XML; write it accordingly so the
-    // declared encoding matches the bytes on disk.
+    // schtasks expects a UTF-16 file, so the declared encoding must match the
+    // bytes actually written.
     let temp = std::env::temp_dir().join("tridragforiwmei_task.xml");
-    write_utf16(&temp, &xml).context("write task xml")?;
+    wrutf16(&temp, &xml).context("write task xml")?;
 
     let output = Command::new("schtasks.exe")
         .args([
             "/Create",
             "/TN",
-            &task_path(),
+            &tskpath(),
             "/XML",
             &temp.to_string_lossy(),
             "/F",
@@ -104,9 +110,10 @@ fn enable_startup() -> Result<()> {
     Ok(())
 }
 
-fn disable_startup() -> Result<()> {
+/// Removes the logon task.
+fn dsbstartup() -> Result<()> {
     let output = Command::new("schtasks.exe")
-        .args(["/Delete", "/TN", &task_path(), "/F"])
+        .args(["/Delete", "/TN", &tskpath(), "/F"])
         .output()
         .context("run schtasks /Delete")?;
 
@@ -119,17 +126,18 @@ fn disable_startup() -> Result<()> {
     Ok(())
 }
 
-/// Encodes `text` as UTF-16LE with a BOM, which is what schtasks /XML reads.
-fn write_utf16(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+/// Writes `text` as UTF-16LE with a BOM, the form schtasks reads.
+fn wrutf16(path: &Path, text: &str) -> std::io::Result<()> {
     let mut bytes = Vec::with_capacity(text.len() * 2 + 2);
-    bytes.extend_from_slice(&[0xFF, 0xFE]); // little-endian BOM
+    bytes.extend_from_slice(&[0xFF, 0xFE]);
     for unit in text.encode_utf16() {
         bytes.extend_from_slice(&unit.to_le_bytes());
     }
     std::fs::write(path, bytes)
 }
 
-fn xml_escape(s: &str) -> String {
+/// Escapes the XML metacharacters in `s`.
+fn xmlescp(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

@@ -6,16 +6,20 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSE_EVENT_FLAGS,
 };
 
-use crate::config::MouseButton;
+use crate::config::Btn;
 
+/// Sub-pixel remainder carried between moves, since SendInput moves in whole
+/// pixels only.
 static FRACTION: Mutex<(f32, f32)> = Mutex::new((0.0, 0.0));
 
+/// Which edge of a mouse button the engine wants to emit.
 #[derive(Debug, Clone, Copy)]
-pub enum ButtonEvent {
+pub enum BtEv {
     Down,
     Up,
 }
 
+/// A 2D offset in touchpad units.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Point {
     pub x: f32,
@@ -23,29 +27,33 @@ pub struct Point {
 }
 
 impl Point {
+    /// Builds a point from raw coordinates.
     pub fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
 
+    /// Euclidean length of the offset.
     pub fn length(&self) -> f32 {
         (self.x * self.x + self.y * self.y).sqrt()
     }
 
+    /// Scales both components in place.
     pub fn multiply(&mut self, m: f32) {
         self.x *= m;
         self.y *= m;
     }
 }
 
-pub fn send_move(dx: f32, dy: f32) {
+/// Moves the cursor by a relative offset, carrying the sub-pixel remainder.
+pub fn sndmov(dx: f32, dy: f32) {
     let (ix, iy) = {
         let mut frac = FRACTION.lock().unwrap();
-        let total_x = dx + frac.0;
-        let total_y = dy + frac.1;
-        let ix = total_x as i32;
-        let iy = total_y as i32;
-        frac.0 = total_x - ix as f32;
-        frac.1 = total_y - iy as f32;
+        let totx = dx + frac.0;
+        let toty = dy + frac.1;
+        let ix = totx as i32;
+        let iy = toty as i32;
+        frac.0 = totx - ix as f32;
+        frac.1 = toty - iy as f32;
         (ix, iy)
     };
 
@@ -53,28 +61,31 @@ pub fn send_move(dx: f32, dy: f32) {
         return;
     }
 
-    send_mouse_input(ix, iy, MOUSEEVENTF_MOVE);
+    sndmsinp(ix, iy, MOUSEEVENTF_MOVE);
 }
 
-pub fn send_button_down(button: MouseButton) {
+/// Presses the configured mouse button.
+pub fn sndbtndwn(button: Btn) {
     let flag = match button {
-        MouseButton::Left => MOUSEEVENTF_LEFTDOWN,
-        MouseButton::Right => MOUSEEVENTF_RIGHTDOWN,
-        MouseButton::Middle => MOUSEEVENTF_MIDDLEDOWN,
+        Btn::Left => MOUSEEVENTF_LEFTDOWN,
+        Btn::Right => MOUSEEVENTF_RIGHTDOWN,
+        Btn::Middle => MOUSEEVENTF_MIDDLEDOWN,
     };
-    send_mouse_input(0, 0, flag);
+    sndmsinp(0, 0, flag);
 }
 
-pub fn send_button_up(button: MouseButton) {
+/// Releases the configured mouse button.
+pub fn sndbtnup(button: Btn) {
     let flag = match button {
-        MouseButton::Left => MOUSEEVENTF_LEFTUP,
-        MouseButton::Right => MOUSEEVENTF_RIGHTUP,
-        MouseButton::Middle => MOUSEEVENTF_MIDDLEUP,
+        Btn::Left => MOUSEEVENTF_LEFTUP,
+        Btn::Right => MOUSEEVENTF_RIGHTUP,
+        Btn::Middle => MOUSEEVENTF_MIDDLEUP,
     };
-    send_mouse_input(0, 0, flag);
+    sndmsinp(0, 0, flag);
 }
 
-fn send_mouse_input(dx: i32, dy: i32, flags: MOUSE_EVENT_FLAGS) {
+/// Injects a single mouse input event.
+fn sndmsinp(dx: i32, dy: i32, flags: MOUSE_EVENT_FLAGS) {
     let input = INPUT {
         r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_MOUSE,
         Anonymous: INPUT_0 {

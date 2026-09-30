@@ -22,30 +22,33 @@ use crate::config::Config;
 use crate::scheduler;
 use crate::utils;
 
+/// Owns the notification-area icon and its context menu.
 pub struct Tray {
     hwnd: HWND,
     icon: HICON,
 }
 
+/// Command identifiers returned by the context menu.
 const ID_ENABLED: u32 = 1;
 const ID_START_BOOT: u32 = 2;
 const ID_OPEN_CONFIG: u32 = 3;
 const ID_QUIT: u32 = 4;
 
 impl Tray {
-    pub fn new(hwnd: HWND, msg_id: u32) -> Result<Self> {
+    /// Adds the notification icon and registers its callback message.
+    pub fn new(hwnd: HWND, msgid: u32) -> Result<Self> {
         let icon = unsafe { LoadIconW(None, IDI_APPLICATION).ok().context("load icon")? };
         let mut nid = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: hwnd,
             uID: 1,
             uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
-            uCallbackMessage: msg_id,
+            uCallbackMessage: msgid,
             hIcon: icon,
             szTip: [0; 128],
             ..Default::default()
         };
-        copy_tooltip(&mut nid.szTip, w!("Three-Finger Drag"));
+        cpytip(&mut nid.szTip, w!("Three-Finger Drag"));
 
         unsafe {
             Shell_NotifyIconW(NIM_ADD, &nid).ok()?;
@@ -53,49 +56,47 @@ impl Tray {
         Ok(Self { hwnd, icon })
     }
 
-    pub fn handle_event(
+    /// Opens the context menu on a mouse-up notification from the icon.
+    pub fn hndlevnt(
         &mut self,
         _wparam: WPARAM,
         lparam: LPARAM,
         config: &mut Config,
-        config_path: &Path,
+        cfgpath: &Path,
     ) {
-        // The low word of lParam carries the mouse message; the high word holds
-        // the icon id, so mask it off before matching.
-        let event = (lparam.0 as u32) & 0xFFFF;
-        match event {
-            WM_LBUTTONUP | WM_RBUTTONUP => self.show_menu(config, config_path),
+        // The low word carries the mouse message; the high word holds the icon
+        // id, so mask it off before matching.
+        match (lparam.0 as u32) & 0xFFFF {
+            WM_LBUTTONUP | WM_RBUTTONUP => self.shwmenu(config, cfgpath),
             _ => {}
         }
     }
 
-    fn show_menu(&mut self, config: &mut Config, config_path: &Path) {
+    /// Builds, displays and acts on the context menu.
+    fn shwmenu(&mut self, config: &mut Config, cfgpath: &Path) {
         unsafe {
-            // Render the menu at the DPI of the monitor the cursor is on. The
-            // returned context is restored once the menu closes so the rest of
-            // the process keeps its default awareness.
+            // Render at the DPI of the monitor the cursor is on, then restore.
             let previous = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
             let _ = SetForegroundWindow(self.hwnd).ok();
             let menu = CreatePopupMenu().unwrap();
 
-            add_menu_item(menu, 0, ID_ENABLED, w!("Enabled"), config.enabled);
-            add_menu_item(
+            addmni(menu, 0, ID_ENABLED, w!("Enabled"), config.enabled);
+            addmni(
                 menu,
                 1,
                 ID_START_BOOT,
                 w!("Start at boot"),
                 config.start_at_boot,
             );
-            add_separator(menu, 2);
-            add_menu_item(menu, 3, ID_OPEN_CONFIG, w!("Open config folder"), false);
-            add_menu_item(menu, 4, ID_QUIT, w!("Quit"), false);
+            addsep(menu, 2);
+            addmni(menu, 3, ID_OPEN_CONFIG, w!("Open config folder"), false);
+            addmni(menu, 4, ID_QUIT, w!("Quit"), false);
 
             let mut pt = Default::default();
             let _ = GetCursorPos(&mut pt).ok();
-            // With TPM_RETURNCMD the return value is the selected command id,
-            // not a boolean. Read the raw value: .as_bool() would collapse
-            // every non-zero id to 1 and make all items look like ID_ENABLED.
+            // With TPM_RETURNCMD the return value is the chosen command id, not
+            // a boolean; the raw value must be read or every item collapses to 1.
             let cmd = TrackPopupMenu(
                 menu,
                 TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN,
@@ -112,75 +113,74 @@ impl Tray {
             match cmd {
                 ID_ENABLED => {
                     config.enabled = !config.enabled;
-                    let _ = config.save(config_path);
+                    let _ = config.save(cfgpath);
                     info!("Enabled toggled to {}", config.enabled);
                 }
-                ID_START_BOOT => {
-                    let target = !config.start_at_boot;
-                    // Registering a HighestAvailable logon task needs admin
-                    // rights. When unelevated, hand off to an elevated child
-                    // running this same binary with a helper flag; it performs
-                    // the change and the config is only persisted on success.
-                    let result = if utils::is_admin() {
-                        scheduler::set_startup(target)
-                    } else {
-                        let flag = if target {
-                            "--task-enable"
-                        } else {
-                            "--task-disable"
-                        };
-                        utils::run_elevated(flag)
-                    };
-                    match result {
-                        Ok(()) => {
-                            config.start_at_boot = target;
-                            let _ = config.save(config_path);
-                            info!("Start at boot toggled to {target}");
-                        }
-                        Err(e) => error!("Failed to update startup task: {e}"),
-                    }
-                }
+                ID_START_BOOT => Self::toogleboot(config, cfgpath),
                 ID_OPEN_CONFIG => {
-                    if let Some(parent) = config_path.parent() {
+                    if let Some(parent) = cfgpath.parent() {
                         let _ = Command::new("explorer.exe").arg(parent).spawn();
                     }
                 }
                 ID_QUIT => {
-                    let _ = config.save(config_path);
-                    remove_icon(self.hwnd);
+                    let _ = config.save(cfgpath);
+                    rmicon(self.hwnd);
                     PostQuitMessage(0);
                 }
                 _ => {}
             }
         }
     }
+
+    /// Toggles the logon task, elevating when the process is unelevated. The
+    /// config is only persisted when the task change actually succeeded.
+    fn toogleboot(config: &mut Config, cfgpath: &Path) {
+        let target = !config.start_at_boot;
+        let result = if utils::isadmin() {
+            scheduler::setstp(target)
+        } else {
+            let flag = if target {
+                "--task-enable"
+            } else {
+                "--task-disable"
+            };
+            utils::runelev(flag)
+        };
+
+        match result {
+            Ok(()) => {
+                config.start_at_boot = target;
+                let _ = config.save(cfgpath);
+                info!("Start at boot toggled to {target}");
+            }
+            Err(e) => error!("Failed to update startup task: {e}"),
+        }
+    }
 }
 
 impl Drop for Tray {
+    /// Removes the notification icon and releases the icon handle.
     fn drop(&mut self) {
         unsafe {
-            remove_icon(self.hwnd);
+            rmicon(self.hwnd);
             let _ = DestroyIcon(self.icon).ok();
         }
     }
 }
 
-unsafe fn add_menu_item(
-    menu: HMENU,
-    pos: u32,
-    id: u32,
-    text: windows::core::PCWSTR,
-    checked: bool,
-) {
+/// Inserts a checked or unchecked menu item at a fixed position.
+unsafe fn addmni(menu: HMENU, pos: u32, id: u32, text: windows::core::PCWSTR, checked: bool) {
     let flags = MF_BYPOSITION | MF_STRING | if checked { MF_CHECKED } else { MF_UNCHECKED };
     let _ = InsertMenuW(menu, pos, flags, id as usize, text).ok();
 }
 
-unsafe fn add_separator(menu: HMENU, pos: u32) {
+/// Inserts a separator at a fixed position.
+unsafe fn addsep(menu: HMENU, pos: u32) {
     let _ = InsertMenuW(menu, pos, MF_BYPOSITION | MF_SEPARATOR, 0, w!("")).ok();
 }
 
-unsafe fn remove_icon(hwnd: HWND) {
+/// Deletes the notification icon from the taskbar.
+unsafe fn rmicon(hwnd: HWND) {
     let nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
@@ -190,15 +190,17 @@ unsafe fn remove_icon(hwnd: HWND) {
     let _ = Shell_NotifyIconW(NIM_DELETE, &nid).ok();
 }
 
-fn copy_tooltip(dst: &mut [u16], src: windows::core::PCWSTR) {
+/// Copies a NUL-terminated wide string into a fixed-size tooltip buffer.
+fn cpytip(dst: &mut [u16], src: windows::core::PCWSTR) {
     unsafe {
         let len = wcslen(src.0);
         let slice = std::slice::from_raw_parts(src.0, len + 1);
-        let copy_len = slice.len().min(dst.len());
-        dst[..copy_len].copy_from_slice(&slice[..copy_len]);
+        let n = slice.len().min(dst.len());
+        dst[..n].copy_from_slice(&slice[..n]);
     }
 }
 
+/// Length of a NUL-terminated wide string.
 unsafe fn wcslen(ptr: *const u16) -> usize {
     let mut i = 0;
     while *ptr.add(i) != 0 {

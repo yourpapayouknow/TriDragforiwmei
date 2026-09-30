@@ -18,87 +18,80 @@ mod tray;
 mod utils;
 
 use config::Config;
-use touchpad::TouchpadEngine;
+use touchpad::TchpdEng;
 use tray::Tray;
 
 const WM_APP_TRAY: u32 = WM_APP + 1;
 
+/// Application entry: dispatches privileged helper runs, then starts the tray.
 fn main() -> Result<()> {
-    // Helpers run once, do their task and exit; they deliberately skip the
-    // single-instance guard and the tray so the running instance is untouched.
-    if let Some(mode) = helper_mode() {
-        utils::init_logging()?;
-        return run_helper(mode);
+    if let Some(mode) = hlprmode() {
+        utils::initlog()?;
+        return runhlpr(mode);
     }
 
-    let _single = utils::single_instance()?;
-    utils::init_logging()?;
+    let _single = utils::snglinst()?;
+    utils::initlog()?;
     info!("Starting tridragforiwmei");
 
-    let config_path = config::config_path()?;
-    let config = Config::load(&config_path)?;
+    let cfgpath = config::cfgpath()?;
+    let config = Config::load(&cfgpath)?;
 
-    // A failed startup-task sync must not stop the app from running; the user
-    // may simply not be elevated, and the drag feature is independent of it.
-    if let Err(e) = scheduler::set_startup(config.start_at_boot) {
+    if let Err(e) = scheduler::setstp(config.start_at_boot) {
         log::error!("Failed to sync startup task: {e}");
     }
 
-    let hwnd = create_message_window()?;
-    TouchpadEngine::register(hwnd)?;
-    info!("Raw input registered for precision touchpad, hwnd={hwnd:?}");
+    let hwnd = mkmsgwnd()?;
+    TchpdEng::register(hwnd)?;
     let tray = Tray::new(hwnd, WM_APP_TRAY)?;
 
-    let mut app = AppState {
-        hwnd,
+    let mut app = ApSt {
         tray,
         config,
-        config_path,
-        touchpad: TouchpadEngine::new(),
+        cfgpath,
+        touchpad: TchpdEng::new(),
     };
 
     unsafe {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr::addr_of_mut!(app) as isize);
-        run_message_loop();
+        runmsgloop();
     }
 
-    app.config.save(&app.config_path)?;
+    app.config.save(&app.cfgpath)?;
     Ok(())
 }
 
-struct AppState {
-    #[allow(dead_code)]
-    hwnd: HWND,
+/// Runtime state shared with the window procedure via GWLP_USERDATA.
+struct ApSt {
     tray: Tray,
     config: Config,
-    config_path: PathBuf,
-    touchpad: TouchpadEngine,
+    cfgpath: PathBuf,
+    touchpad: TchpdEng,
 }
 
-fn create_message_window() -> Result<HWND> {
+/// Registers the window class and creates the hidden top-level window.
+fn mkmsgwnd() -> Result<HWND> {
     let instance = unsafe { GetModuleHandleW(None)? };
-    let class_name = w!("TriDragForIwmeiMessageWindow");
+    let clsname = w!("TriDragForIwmeiMessageWindow");
 
     let wc = WNDCLASSEXW {
         cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-        lpfnWndProc: Some(window_proc),
+        lpfnWndProc: Some(wndproc),
         hInstance: instance.into(),
-        lpszClassName: class_name,
+        lpszClassName: clsname,
         ..Default::default()
     };
 
-    let atom = unsafe { RegisterClassExW(&wc) };
-    if atom == 0 {
+    if unsafe { RegisterClassExW(&wc) } == 0 {
         anyhow::bail!("RegisterClassExW failed");
     }
 
-    // Raw input with RIDEV_INPUTSINK requires a real top-level window; a
-    // message-only window (HWND_MESSAGE) never receives WM_INPUT reports.
-    // Use a hidden top-level window excluded from the taskbar and Alt+Tab.
+    // RIDEV_INPUTSINK needs a real top-level window; a message-only window
+    // never receives WM_INPUT. Hide it from the taskbar and from Alt+Tab.
     unsafe {
         CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            class_name,
+            clsname,
             w!("TriDragForIwmei"),
             WS_POPUP,
             0,
@@ -114,7 +107,8 @@ fn create_message_window() -> Result<HWND> {
     }
 }
 
-unsafe fn run_message_loop() {
+/// Pumps the thread message queue until WM_QUIT.
+unsafe fn runmsgloop() {
     let mut msg = MSG::default();
     while GetMessageW(&mut msg, None, 0, 0).into() {
         let _ = TranslateMessage(&msg);
@@ -122,107 +116,102 @@ unsafe fn run_message_loop() {
     }
 }
 
-unsafe extern "system" fn window_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+/// Routes window messages to their handlers.
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
-        WM_INPUT => handle_input(hwnd, lparam),
-        WM_INPUT_DEVICE_CHANGE => handle_device_change(hwnd, lparam),
-        WM_APP_TRAY => handle_tray(hwnd, wparam, lparam),
-        WM_TIMER => handle_timer(hwnd, wparam),
-        WM_DESTROY => handle_destroy(hwnd),
+        WM_INPUT => hndlinp(hwnd, lparam),
+        WM_INPUT_DEVICE_CHANGE => hndldevchg(hwnd, lparam),
+        WM_APP_TRAY => hndltray(hwnd, wparam, lparam),
+        WM_TIMER => hndltmr(hwnd, wparam),
+        WM_DESTROY => hndldstr(hwnd),
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
-unsafe fn handle_input(hwnd: HWND, lparam: LPARAM) -> LRESULT {
-    let app = get_app_state(hwnd);
+/// Feeds touchpad contacts into the drag engine and emits mouse events.
+unsafe fn hndlinp(hwnd: HWND, lparam: LPARAM) -> LRESULT {
+    let app = getapst(hwnd);
     if app.config.enabled {
-        if let Some(contacts) = app.touchpad.parse_input(lparam.0 as _) {
-            let device_id = app.touchpad.current_device_id();
+        if let Some(contacts) = app.touchpad.prsinp(lparam.0 as _) {
+            let devid = app.touchpad.curdevid();
 
-            if let Some(delta) = app
-                .touchpad
-                .engine
-                .on_contacts(&contacts, &app.config, &device_id)
-            {
-                mouse::send_move(delta.x, delta.y);
+            if let Some(delta) = app.touchpad.engine.onctc(&contacts, &app.config, &devid) {
+                mouse::sndmov(delta.x, delta.y);
             }
-            match app.touchpad.engine.button_event() {
-                Some(mouse::ButtonEvent::Down) => mouse::send_button_down(app.config.button),
-                Some(mouse::ButtonEvent::Up) => mouse::send_button_up(app.config.button),
+            match app.touchpad.engine.btnevnt() {
+                Some(mouse::BtEv::Down) => mouse::sndbtndwn(app.config.button),
+                Some(mouse::BtEv::Up) => mouse::sndbtnup(app.config.button),
                 None => {}
             }
-            if app.touchpad.engine.is_dragging() {
-                let _ = SetTimer(
-                    Some(hwnd),
-                    touchpad::RELEASE_TIMER_ID,
-                    app.config.release_delay(),
-                    None,
-                );
+            if app.touchpad.engine.isdrgging() {
+                let _ = SetTimer(Some(hwnd), touchpad::RLS_TMR_ID, app.config.rlsdly(), None);
             }
         }
     }
     DefWindowProcW(hwnd, WM_INPUT, WPARAM(lparam.0 as _), lparam)
 }
 
-unsafe fn handle_device_change(hwnd: HWND, lparam: LPARAM) -> LRESULT {
-    let app = get_app_state(hwnd);
-    app.touchpad.on_device_change(HANDLE(lparam.0 as _));
+/// Drops cached touchpad caps so the next report re-queries the device set.
+unsafe fn hndldevchg(hwnd: HWND, lparam: LPARAM) -> LRESULT {
+    let app = getapst(hwnd);
+    app.touchpad.ondevchg(HANDLE(lparam.0 as _));
     DefWindowProcW(hwnd, WM_INPUT_DEVICE_CHANGE, WPARAM(0), lparam)
 }
 
-unsafe fn handle_tray(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    let app = get_app_state(hwnd);
+/// Forwards tray callback messages to the tray menu.
+unsafe fn hndltray(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let app = getapst(hwnd);
     app.tray
-        .handle_event(wparam, lparam, &mut app.config, &app.config_path);
+        .hndlevnt(wparam, lparam, &mut app.config, &app.cfgpath);
     LRESULT(0)
 }
 
-unsafe fn handle_timer(hwnd: HWND, wparam: WPARAM) -> LRESULT {
-    let app = get_app_state(hwnd);
-    if wparam.0 == touchpad::RELEASE_TIMER_ID {
-        app.touchpad.engine.on_release_timer();
-        if !app.touchpad.engine.is_dragging() {
-            let _ = KillTimer(Some(hwnd), touchpad::RELEASE_TIMER_ID);
+/// Ends a drag once the release delay elapses without new input.
+unsafe fn hndltmr(hwnd: HWND, wparam: WPARAM) -> LRESULT {
+    let app = getapst(hwnd);
+    if wparam.0 == touchpad::RLS_TMR_ID {
+        app.touchpad.engine.onrltmr();
+        if !app.touchpad.engine.isdrgging() {
+            let _ = KillTimer(Some(hwnd), touchpad::RLS_TMR_ID);
         }
     }
     DefWindowProcW(hwnd, WM_TIMER, wparam, LPARAM(0))
 }
 
-unsafe fn handle_destroy(hwnd: HWND) -> LRESULT {
-    let app = get_app_state(hwnd);
-    let _ = app.config.save(&app.config_path);
+/// Persists config and quits the message loop.
+unsafe fn hndldstr(hwnd: HWND) -> LRESULT {
+    let app = getapst(hwnd);
+    let _ = app.config.save(&app.cfgpath);
     PostQuitMessage(0);
     LRESULT(0)
 }
 
-unsafe fn get_app_state(hwnd: HWND) -> &'static mut AppState {
+/// Reads the application state pointer stored in the window user data.
+unsafe fn getapst(hwnd: HWND) -> &'static mut ApSt {
     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-    &mut *(ptr as *mut AppState)
+    &mut *(ptr as *mut ApSt)
 }
 
-/// Helper invocations used to run privileged setup from an unelevated process.
+/// Privileged setup modes run by an elevated copy of this binary.
 #[derive(Clone, Copy)]
-enum Helper {
-    EnableStartup,
-    DisableStartup,
+enum Hlpr {
+    EnbStartup,
+    DsbStartup,
 }
 
-fn helper_mode() -> Option<Helper> {
+/// Detects a helper invocation from the command line.
+fn hlprmode() -> Option<Hlpr> {
     env::args().skip(1).find_map(|arg| match arg.as_str() {
-        "--task-enable" => Some(Helper::EnableStartup),
-        "--task-disable" => Some(Helper::DisableStartup),
+        "--task-enable" => Some(Hlpr::EnbStartup),
+        "--task-disable" => Some(Hlpr::DsbStartup),
         _ => None,
     })
 }
 
-fn run_helper(mode: Helper) -> Result<()> {
-    let enabled = matches!(mode, Helper::EnableStartup);
-    let result = scheduler::set_startup(enabled);
+/// Applies the requested startup task state, then exits.
+fn runhlpr(mode: Hlpr) -> Result<()> {
+    let enabled = matches!(mode, Hlpr::EnbStartup);
+    let result = scheduler::setstp(enabled);
     match &result {
         Ok(()) => info!("Helper set startup task enabled={enabled}"),
         Err(e) => log::error!("Helper failed to set startup task: {e}"),

@@ -10,58 +10,43 @@ use windows::Win32::Foundation::{
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, OpenProcessToken};
-use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+use windows::Win32::UI::Shell::{
+    IsUserAnAdmin, ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-/// Logging level. Kept at Debug for diagnostics; the hot per-report path uses
-/// trace!, so this still produces no steady disk writes during normal use.
-pub fn init_logging() -> Result<()> {
-    let log_dir = dirs::data_dir()
+/// Redirects logging to a file under the user's roaming data directory.
+pub fn initlog() -> Result<()> {
+    let dir = dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("TriDragForIwmei");
-    fs::create_dir_all(&log_dir)?;
-    let log_path = log_dir.join("tridragforiwmei.log");
-    let file = File::create(&log_path).context("open log file")?;
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("tridragforiwmei.log");
+    let file = File::create(&path).context("open log file")?;
     WriteLogger::init(LevelFilter::Debug, LogConfig::default(), file).context("init logger")?;
-    info!("Log file: {:?}", log_path);
+    info!("Log file: {:?}", path);
     Ok(())
 }
 
-pub fn single_instance() -> Result<SingleInstanceGuard> {
-    let name = w!("Global\\TriDragForIwmeiSingleInstance");
-    unsafe {
-        let handle = CreateMutexW(None, true, name)?;
-        if GetLastError() == WIN32_ERROR(183) {
-            CloseHandle(handle)?;
-            anyhow::bail!("Another instance is already running");
-        }
-        Ok(SingleInstanceGuard(handle))
-    }
-}
-
 /// Whether this process currently holds administrator rights.
-pub fn is_admin() -> bool {
-    unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().into() }
+pub fn isadmin() -> bool {
+    unsafe { IsUserAnAdmin().into() }
 }
 
-/// Relaunches this executable elevated via the shell "runas" verb, passing
-/// `args` and waiting for the child to exit. Returns an error if the user
-/// cancels the UAC prompt so the caller can leave its state unchanged.
-///
-/// Using ShellExecuteExW directly avoids spawning a PowerShell host, which
-/// matters because this is the only elevation path the app needs.
-pub fn run_elevated(args: &str) -> Result<()> {
+/// Relaunches this executable elevated with the shell "runas" verb, passing
+/// `args`. Returns an error when the user cancels the UAC prompt so the caller
+/// can leave its state unchanged.
+pub fn runelev(args: &str) -> Result<()> {
     let exe = std::env::current_exe().context("current_exe")?;
-    let exe_wide = wide(&exe.to_string_lossy());
-    let args_wide = wide(args);
-    let verb = w!("runas");
+    let exewide = widen(&exe.to_string_lossy());
+    let argswide = widen(args);
 
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_NOCLOSEPROCESS,
-        lpVerb: verb,
-        lpFile: windows::core::PCWSTR(exe_wide.as_ptr()),
-        lpParameters: windows::core::PCWSTR(args_wide.as_ptr()),
+        lpVerb: w!("runas"),
+        lpFile: windows::core::PCWSTR(exewide.as_ptr()),
+        lpParameters: windows::core::PCWSTR(argswide.as_ptr()),
         nShow: SW_SHOWNORMAL.0,
         ..Default::default()
     };
@@ -75,15 +60,8 @@ pub fn run_elevated(args: &str) -> Result<()> {
     Ok(())
 }
 
-/// Expands `line` to a NUL-terminated UTF-16 buffer for wide-char Win32 calls.
-fn wide(line: &str) -> Vec<u16> {
-    line.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-/// Returns the current user's SID as a string, e.g. "S-1-5-21-...".
-/// Task Scheduler accepts a SID for <UserId>, which avoids ambiguity around
-/// spaced or localised account names.
-pub fn current_user_sid() -> Result<String> {
+/// Returns the current user's SID string, e.g. "S-1-5-21-...".
+pub fn curusrsid() -> Result<String> {
     unsafe {
         let mut token = HANDLE::default();
         OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
@@ -106,13 +84,13 @@ pub fn current_user_sid() -> Result<String> {
             )
             .context("GetTokenInformation")?;
 
-            let token_user = &*(buf.as_ptr() as *const TOKEN_USER);
-            let mut sid_str = PWSTR::null();
-            ConvertSidToStringSidW(token_user.User.Sid, &mut sid_str)
+            let tuser = &*(buf.as_ptr() as *const TOKEN_USER);
+            let mut sidstr = PWSTR::null();
+            ConvertSidToStringSidW(tuser.User.Sid, &mut sidstr)
                 .context("ConvertSidToStringSidW")?;
 
-            let sid = sid_str.to_string().context("SID is not valid UTF-8")?;
-            let _ = LocalFree(Some(HLOCAL(sid_str.0 as _)));
+            let sid = sidstr.to_string().context("SID is not valid UTF-8")?;
+            let _ = LocalFree(Some(HLOCAL(sidstr.0 as _)));
             Ok(sid)
         })();
 
@@ -121,12 +99,31 @@ pub fn current_user_sid() -> Result<String> {
     }
 }
 
-pub struct SingleInstanceGuard(HANDLE);
+/// Takes ownership of a named mutex so only one instance can run.
+pub fn snglinst() -> Result<SnglInst> {
+    let name = w!("Global\\TriDragForIwmeiSingleInstance");
+    unsafe {
+        let handle = CreateMutexW(None, true, name)?;
+        if GetLastError() == WIN32_ERROR(183) {
+            CloseHandle(handle)?;
+            anyhow::bail!("Another instance is already running");
+        }
+        Ok(SnglInst(handle))
+    }
+}
 
-impl Drop for SingleInstanceGuard {
+/// Releases the single-instance mutex when dropped.
+pub struct SnglInst(HANDLE);
+
+impl Drop for SnglInst {
     fn drop(&mut self) {
         unsafe {
             let _ = CloseHandle(self.0);
         }
     }
+}
+
+/// Expands a string into a NUL-terminated UTF-16 buffer.
+fn widen(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
 }
