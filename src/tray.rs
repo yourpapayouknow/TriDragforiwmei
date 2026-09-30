@@ -9,16 +9,18 @@ use windows::Win32::UI::HiDpi::{
     SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos, InsertMenuW, LoadIconW,
     PostQuitMessage, SetForegroundWindow, TrackPopupMenu, HICON, HMENU, IDI_APPLICATION,
-    MF_BYPOSITION, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_LEFTALIGN, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_LBUTTONUP, WM_RBUTTONUP,
+    MF_BYPOSITION, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_LEFTALIGN,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_LBUTTONUP, WM_RBUTTONUP,
 };
 
 use crate::config::Config;
+use crate::lang::{Lang, TxtKey};
 use crate::scheduler;
 use crate::utils;
 
@@ -33,10 +35,12 @@ const ID_ENABLED: u32 = 1;
 const ID_START_BOOT: u32 = 2;
 const ID_OPEN_CONFIG: u32 = 3;
 const ID_QUIT: u32 = 4;
+const ID_LANG_ZH: u32 = 5;
+const ID_LANG_EN: u32 = 6;
 
 impl Tray {
     /// Adds the notification icon and registers its callback message.
-    pub fn new(hwnd: HWND, msgid: u32) -> Result<Self> {
+    pub fn new(hwnd: HWND, msgid: u32, lang: Lang) -> Result<Self> {
         let icon = unsafe { LoadIconW(None, IDI_APPLICATION).ok().context("load icon")? };
         let mut nid = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -48,7 +52,7 @@ impl Tray {
             szTip: [0; 128],
             ..Default::default()
         };
-        cpytip(&mut nid.szTip, w!("Three-Finger Drag"));
+        cpytip(&mut nid.szTip, lang.txt(TxtKey::Tooltip));
 
         unsafe {
             Shell_NotifyIconW(NIM_ADD, &nid).ok()?;
@@ -80,18 +84,52 @@ impl Tray {
 
             let _ = SetForegroundWindow(self.hwnd).ok();
             let menu = CreatePopupMenu().unwrap();
+            let lang = config.lang;
 
-            addmni(menu, 0, ID_ENABLED, w!("Enabled"), config.enabled);
+            addmni(
+                menu,
+                0,
+                ID_ENABLED,
+                lang.txt(TxtKey::Enabled),
+                config.enabled,
+            );
             addmni(
                 menu,
                 1,
                 ID_START_BOOT,
-                w!("Start at boot"),
+                lang.txt(TxtKey::StartBoot),
                 config.start_at_boot,
             );
             addsep(menu, 2);
-            addmni(menu, 3, ID_OPEN_CONFIG, w!("Open config folder"), false);
-            addmni(menu, 4, ID_QUIT, w!("Quit"), false);
+            addmni(menu, 3, ID_OPEN_CONFIG, lang.txt(TxtKey::OpenCfg), false);
+
+            // Language submenu, with a check mark on the active language.
+            let submenu = CreatePopupMenu().unwrap();
+            addmni(
+                submenu,
+                0,
+                ID_LANG_ZH,
+                lang.txt(TxtKey::LangZh),
+                lang == Lang::Zh,
+            );
+            addmni(
+                submenu,
+                1,
+                ID_LANG_EN,
+                lang.txt(TxtKey::LangEn),
+                lang == Lang::En,
+            );
+            let subtext = widen(lang.txt(TxtKey::LangLabel));
+            let _ = InsertMenuW(
+                menu,
+                4,
+                MF_BYPOSITION | MF_STRING | MF_POPUP,
+                submenu.0 as usize,
+                windows::core::PCWSTR(subtext.as_ptr()),
+            )
+            .ok();
+
+            addmni(menu, 5, ID_QUIT, lang.txt(TxtKey::Quit), false);
 
             let mut pt = Default::default();
             let _ = GetCursorPos(&mut pt).ok();
@@ -122,6 +160,20 @@ impl Tray {
                         let _ = Command::new("explorer.exe").arg(parent).spawn();
                     }
                 }
+                ID_LANG_ZH | ID_LANG_EN => {
+                    let picked = if cmd == ID_LANG_ZH {
+                        Lang::Zh
+                    } else {
+                        Lang::En
+                    };
+                    if picked != config.lang {
+                        config.lang = picked;
+                        let _ = config.save(cfgpath);
+                        // The tooltip is baked into the icon, so update it now.
+                        self.rfreshtip(picked);
+                        info!("Language switched to {:?}", picked);
+                    }
+                }
                 ID_QUIT => {
                     let _ = config.save(cfgpath);
                     rmicon(self.hwnd);
@@ -129,6 +181,22 @@ impl Tray {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Rewrites the notification icon tooltip after a language change.
+    fn rfreshtip(&self, lang: Lang) {
+        let mut nid = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: self.hwnd,
+            uID: 1,
+            uFlags: NIF_TIP,
+            szTip: [0; 128],
+            ..Default::default()
+        };
+        cpytip(&mut nid.szTip, lang.txt(TxtKey::Tooltip));
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &nid).ok();
         }
     }
 
@@ -169,9 +237,17 @@ impl Drop for Tray {
 }
 
 /// Inserts a checked or unchecked menu item at a fixed position.
-unsafe fn addmni(menu: HMENU, pos: u32, id: u32, text: windows::core::PCWSTR, checked: bool) {
+unsafe fn addmni(menu: HMENU, pos: u32, id: u32, text: &str, checked: bool) {
     let flags = MF_BYPOSITION | MF_STRING | if checked { MF_CHECKED } else { MF_UNCHECKED };
-    let _ = InsertMenuW(menu, pos, flags, id as usize, text).ok();
+    let wide = widen(text);
+    let _ = InsertMenuW(
+        menu,
+        pos,
+        flags,
+        id as usize,
+        windows::core::PCWSTR(wide.as_ptr()),
+    )
+    .ok();
 }
 
 /// Inserts a separator at a fixed position.
@@ -190,21 +266,14 @@ unsafe fn rmicon(hwnd: HWND) {
     let _ = Shell_NotifyIconW(NIM_DELETE, &nid).ok();
 }
 
-/// Copies a NUL-terminated wide string into a fixed-size tooltip buffer.
-fn cpytip(dst: &mut [u16], src: windows::core::PCWSTR) {
-    unsafe {
-        let len = wcslen(src.0);
-        let slice = std::slice::from_raw_parts(src.0, len + 1);
-        let n = slice.len().min(dst.len());
-        dst[..n].copy_from_slice(&slice[..n]);
-    }
+/// Copies a text into a fixed-size tooltip buffer, truncating if needed.
+fn cpytip(dst: &mut [u16], src: &str) {
+    let wide = widen(src);
+    let n = wide.len().min(dst.len());
+    dst[..n].copy_from_slice(&wide[..n]);
 }
 
-/// Length of a NUL-terminated wide string.
-unsafe fn wcslen(ptr: *const u16) -> usize {
-    let mut i = 0;
-    while *ptr.add(i) != 0 {
-        i += 1;
-    }
-    i
+/// Expands a text into a NUL-terminated UTF-16 buffer.
+fn widen(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
 }

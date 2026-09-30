@@ -1,3 +1,7 @@
+// Build as a GUI binary so Windows never allocates a console window. Debug
+// builds keep the console so log output stays visible during development.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::env;
 use std::path::PathBuf;
 use std::ptr;
@@ -11,6 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 mod config;
 mod drag_engine;
+mod lang;
 mod mouse;
 mod scheduler;
 mod touchpad;
@@ -25,13 +30,25 @@ const WM_APP_TRAY: u32 = WM_APP + 1;
 
 /// Application entry: dispatches privileged helper runs, then starts the tray.
 fn main() -> Result<()> {
-    if let Some(mode) = hlprmode() {
-        utils::initlog()?;
-        return runhlpr(mode);
-    }
-
-    let _single = utils::snglinst()?;
+    // Logging comes first so a failure on any later step is recorded. As a GUI
+    // binary there is no console, so the log file is the only diagnostic.
     utils::initlog()?;
+
+    let result = if let Some(mode) = hlprmode() {
+        runhlpr(mode)
+    } else {
+        runapp()
+    };
+
+    if let Err(e) = &result {
+        log::error!("Fatal: {e:#}");
+    }
+    result
+}
+
+/// Sets up the single instance, window, tray and message loop.
+fn runapp() -> Result<()> {
+    let _single = utils::snglinst()?;
     info!("Starting tridragforiwmei");
 
     let cfgpath = config::cfgpath()?;
@@ -43,7 +60,7 @@ fn main() -> Result<()> {
 
     let hwnd = mkmsgwnd()?;
     TchpdEng::register(hwnd)?;
-    let tray = Tray::new(hwnd, WM_APP_TRAY)?;
+    let tray = Tray::new(hwnd, WM_APP_TRAY, config.lang)?;
 
     let mut app = ApSt {
         tray,

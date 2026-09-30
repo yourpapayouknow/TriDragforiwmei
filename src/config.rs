@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::lang::Lang;
+
 /// Current on-disk settings schema version.
 const CFG_VER: i32 = 1;
 
@@ -27,6 +29,9 @@ pub struct Config {
     pub stop_threshold: f32,
     pub run_elevated: bool,
     pub start_at_boot: bool,
+    /// Interface language; absent files default to the system UI language.
+    #[serde(default)]
+    pub lang: Lang,
     pub device_configs: HashMap<String, DevCfg>,
 }
 
@@ -61,6 +66,7 @@ impl Default for Config {
             stop_threshold: 10.0,
             run_elevated: false,
             start_at_boot: false,
+            lang: Lang::default(),
             device_configs: HashMap::new(),
         }
     }
