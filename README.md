@@ -10,14 +10,14 @@
 
 [![平台](https://img.shields.io/badge/平台-Windows%2010%2B-blue.svg?style=flat-square)](https://www.microsoft.com/windows)
 [![语言](https://img.shields.io/badge/语言-Rust%202021-orange.svg?style=flat-square)](src/)
-[![内存](https://img.shields.io/badge/内存-约%209%20MB-green.svg?style=flat-square)](src/)
+[![内存](https://img.shields.io/badge/内存-约%202%20MB-green.svg?style=flat-square)](src/)
 [![许可证](https://img.shields.io/badge/许可证-GPL--3.0-blue.svg?style=flat-square)](LICENSE)
 
 </div>
 
 ---
 
-TriDragforiwmei 把 macOS 的三指拖拽手感带到 Windows 精密触摸板。三指按住并滑动即可拖动窗口或选中文本，全程无需按下物理按键。程序以无窗口托盘形态常驻，直接读取触摸板的 HID 报告识别人手势，再通过 SendInput 注入鼠标事件，常驻内存约 9 MB，单文件发布体积约 650 KB。
+TriDragforiwmei 把 macOS 的三指拖拽手感带到 Windows 精密触摸板。三指按住并滑动即可拖动窗口或选中文本，全程无需按下物理按键。程序以无窗口托盘形态常驻，直接读取触摸板的 HID 报告识别人手势，再通过 SendInput 注入鼠标事件，常驻内存约 2 MB，单文件发布体积约 650 KB。
 
 ---
 
@@ -121,7 +121,7 @@ graph TD
 
 ![任务管理器内存占用](assets/screenshot-task-manager.png)
 
-*任务管理器实测常驻内存约 9 MB*
+*任务管理器实测常驻内存约 2 MB*
 
 </div>
 

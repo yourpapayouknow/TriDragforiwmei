@@ -10,14 +10,14 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%2B-blue.svg?style=flat-square)](https://www.microsoft.com/windows)
 [![Language](https://img.shields.io/badge/Language-Rust%202021-orange.svg?style=flat-square)](src/)
-[![Memory](https://img.shields.io/badge/Memory-about%209%20MB-green.svg?style=flat-square)](src/)
+[![Memory](https://img.shields.io/badge/Memory-about%202%20MB-green.svg?style=flat-square)](src/)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg?style=flat-square)](LICENSE)
 
 </div>
 
 ---
 
-TriDragforiwmei brings the macOS three-finger drag gesture to Windows Precision Touchpads. Rest three fingers on the touchpad and slide to drag a window or select text, with no physical button press required. The program runs as a windowless tray utility, reading touchpad HID reports directly to recognise the gesture and then injecting mouse events through SendInput. It idles at roughly 9 MB of resident memory and ships as a single binary of about 650 KB.
+TriDragforiwmei brings the macOS three-finger drag gesture to Windows Precision Touchpads. Rest three fingers on the touchpad and slide to drag a window or select text, with no physical button press required. The program runs as a windowless tray utility, reading touchpad HID reports directly to recognise the gesture and then injecting mouse events through SendInput. It idles at roughly 2 MB of resident memory and ships as a single binary of about 650 KB.
 
 ---
 
@@ -121,7 +121,7 @@ The program creates a hidden top-level window to receive raw input, and that win
 
 ![Resident memory in Task Manager](assets/screenshot-task-manager.png)
 
-*Task Manager reads roughly 9 MB of resident memory*
+*Task Manager reads roughly 2 MB of resident memory*
 
 </div>
 
