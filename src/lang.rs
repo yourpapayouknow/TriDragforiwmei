@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Text keys shown in the tray menu and tooltip. Each variant maps to one
-/// user-visible string, so adding a label means adding a variant and its
-/// translations side by side.
+// 界面文本的键，每个键对应一条用户可见字符串
 #[derive(Debug, Clone, Copy)]
 pub enum TxtKey {
     Tooltip,
@@ -10,13 +8,12 @@ pub enum TxtKey {
     StartBoot,
     OpenCfg,
     Quit,
-    /// Label appended to show the currently selected language.
     LangLabel,
     LangZh,
     LangEn,
 }
 
-/// Interface language, persisted in the config file.
+// 界面语言，随配置持久化
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Lang {
@@ -24,8 +21,8 @@ pub enum Lang {
     En,
 }
 
+// 配置无语言项时跟随系统界面语言
 impl Default for Lang {
-    /// Falls back to the system UI language when the config has no entry.
     fn default() -> Self {
         if syslang() {
             Lang::Zh
@@ -36,8 +33,7 @@ impl Default for Lang {
 }
 
 impl Lang {
-    /// Returns the text for `key` in this language. Strings are static and live
-    /// in the read-only section, so switching costs no allocation.
+    // 取指定键在当前语言下的文本，字符串为静态常量不占堆
     pub fn txt(self, key: TxtKey) -> &'static str {
         match (self, key) {
             (Lang::Zh, TxtKey::Tooltip) => "三指拖动",
@@ -61,11 +57,10 @@ impl Lang {
     }
 }
 
-/// Whether the Windows user interface language is Chinese. Reads the primary
-/// language identifier from the user locale without loading any resource.
+// 系统界面语言是否为中文，主语言标识 0x04 即中文任意子语言
 fn syslang() -> bool {
     use windows::Win32::Globalization::GetUserDefaultUILanguage;
-    // Primary language id 0x04 is Chinese in any sublanguage.
+    // 中文主语言标识
     const LANG_CHINESE: u16 = 0x04;
     let id = unsafe { GetUserDefaultUILanguage() };
     (id & 0x3FF) as u16 == LANG_CHINESE

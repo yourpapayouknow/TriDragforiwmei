@@ -6,7 +6,7 @@ use log::{debug, trace};
 use crate::config::{Config, DevCfg, RLS_FNG_THR_MS};
 use crate::mouse::{BtEv, Point};
 
-/// A single touchpad contact with its identifier and coordinates.
+// 单个触摸板触点，含标识与坐标
 #[derive(Debug, Clone, Copy)]
 pub struct TpCtc {
     pub id: i32,
@@ -15,7 +15,7 @@ pub struct TpCtc {
 }
 
 impl TpCtc {
-    /// Euclidean distance to another contact.
+    // 到另一触点的欧氏距离
     pub fn getdst2d(&self, other: &Self) -> f32 {
         let dx = (other.x - self.x) as f32;
         let dy = (other.y - self.y) as f32;
@@ -23,8 +23,7 @@ impl TpCtc {
     }
 }
 
-/// Recognises three-finger drags and reports the resulting cursor motion and
-/// button edges.
+// 识别三指拖拽，并输出光标位移与按键边沿
 pub struct DrgEng {
     isdrgging: bool,
     dstmgr: DstMgr,
@@ -38,7 +37,7 @@ pub struct DrgEng {
 }
 
 impl DrgEng {
-    /// Creates an engine with no contacts seen yet.
+    // 构造尚未收到任何触点的引擎
     pub fn new() -> Self {
         Self {
             isdrgging: false,
@@ -53,8 +52,7 @@ impl DrgEng {
         }
     }
 
-    /// Advances the state machine with one contact report, returning the cursor
-    /// offset to apply when a drag is in progress.
+    // 用一帧触点推进状态机，拖拽中返回待施加的光标位移
     pub fn onctc(&mut self, ctc: &[TpCtc], config: &Config, devid: &str) -> Option<Point> {
         let now = Instant::now();
         let elapsed = now.duration_since(self.lasttime).as_millis() as u32;
@@ -109,17 +107,17 @@ impl DrgEng {
         None
     }
 
-    /// Takes the pending button edge, if any, for the caller to emit.
+    // 取走待发出的按键边沿
     pub fn btnevnt(&mut self) -> Option<BtEv> {
         self.pendbtn.take()
     }
 
-    /// Whether a drag is currently held.
+    // 当前是否处于拖拽保持状态
     pub fn isdrgging(&self) -> bool {
         self.isdrgging
     }
 
-    /// Ends the drag when the release timer fires.
+    // 释放定时器触发时结束拖拽
     pub fn onrltmr(&mut self) {
         if self.isdrgging {
             debug!("STOP DRAG from timer");
@@ -127,7 +125,7 @@ impl DrgEng {
         }
     }
 
-    /// Clears drag state and queues the button release.
+    // 清空拖拽状态并排入按键抬起
     fn stopdrg(&mut self) {
         self.isdrgging = false;
         self.pendbtn = Some(BtEv::Up);
@@ -138,7 +136,7 @@ impl DrgEng {
         self.avgcnt = 0;
     }
 
-    /// Whether two contact lists describe the same set of contact identifiers.
+    // 两组触点是否描述同一批触点标识
     fn areidscmn(a: &[TpCtc], b: &[TpCtc]) -> bool {
         if a.len() != b.len() {
             return false;
@@ -147,15 +145,14 @@ impl DrgEng {
     }
 }
 
-/// Tracks which contacts have settled long enough to be measured, and the
-/// longest movement seen between the old and new reports.
+// 记录哪些触点已稳定到可参与测距，以及新旧两帧间的最大位移
 struct DstMgr {
     quarantine: HashMap<i32, Instant>,
     trusted: Vec<i32>,
 }
 
 impl DstMgr {
-    /// Creates an empty tracker.
+    // 构造空的跟踪器
     fn new() -> Self {
         Self {
             quarantine: HashMap::new(),
@@ -163,14 +160,13 @@ impl DstMgr {
         }
     }
 
-    /// Forgets all contacts, e.g. after the fingers were lifted.
+    // 清空全部触点记录，例如手指离开后
     fn reset(&mut self) {
         self.quarantine.clear();
         self.trusted.clear();
     }
 
-    /// Returns the identifier, offset and 2D distance of the contact that moved
-    /// furthest, ignoring contacts still inside the settle window.
+    // 返回位移最大触点的标识、偏移量与二维距离，稳定期内的触点不参与
     fn longest(&mut self, old: &[TpCtc], new: &[TpCtc], released: bool) -> (i32, Point, f32) {
         if released {
             self.reset();
@@ -217,8 +213,7 @@ impl DstMgr {
     }
 }
 
-/// Counts moving fingers over a short and a long movement window, which
-/// separates an accidental brush from an intended three-finger drag.
+// 按短、长两个位移窗口统计移动手指数，用于区分误触与有意拖拽
 struct FngCnt {
     origcnt: i32,
     shortmv: f32,
@@ -228,7 +223,7 @@ struct FngCnt {
 }
 
 impl FngCnt {
-    /// Creates a counter with all windows empty.
+    // 构造各窗口为空的计数器
     fn new() -> Self {
         Self {
             origcnt: 0,
@@ -239,7 +234,7 @@ impl FngCnt {
         }
     }
 
-    /// Clears all counters.
+    // 清空全部计数
     fn reset(&mut self) {
         self.origcnt = 0;
         self.shortmv = 0.0;
@@ -248,8 +243,7 @@ impl FngCnt {
         self.longcnt = 0;
     }
 
-    /// Accumulates movement and returns (fingers on pad, short-delay moving
-    /// count, long-delay moving count, original finger count).
+    // 累计位移，返回（板上手指数，短延迟移动数，长延迟移动数，初始手指数）
     fn count(
         &mut self,
         ctc: &[TpCtc],
@@ -290,12 +284,12 @@ impl FngCnt {
     }
 }
 
-/// Scales a distance by the device cursor speed for threshold accumulation.
+// 按设备光标速度缩放位移，供阈值累计使用
 fn aplspd(distance: f32, config: &Config, devid: &str) -> f32 {
     distance * (config.devcfg(devid).cursor_speed / 60.0)
 }
 
-/// Scales a drag offset by the device speed and the acceleration curve.
+// 按设备速度与加速度曲线缩放拖拽偏移
 fn aplspdacc(delta: Point, elapsed_ms: u32, devcfg: &DevCfg) -> Point {
     let mut d = delta;
     d.multiply(devcfg.cursor_speed / 120.0);

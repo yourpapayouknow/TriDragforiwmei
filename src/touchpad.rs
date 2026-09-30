@@ -15,25 +15,24 @@ use windows::Win32::UI::Input::{
 
 use crate::drag_engine::{DrgEng, TpCtc};
 
-/// Timer id used to end a drag after the release delay.
+// 释放延迟到期后用于结束拖拽的定时器标识
 pub const RLS_TMR_ID: usize = 1;
 
-/// HID usage page and usage identifying a Windows Precision Touchpad.
+// 精密触摸板的 HID 用途页与用途
 const PTP_UP: u16 = 0x000D;
 const PTP_US: u16 = 0x0005;
 
-/// Raw input flags: receive input while unfocused and get device notifications.
+// 原始输入标志：失焦时仍接收输入，并接收设备变更通知
 const RIDEV_FLAGS: u32 = 0x0000_2100;
 
-/// Owns the raw-input registration and device caches, and feeds the drag engine.
+// 持有原始输入注册与设备缓存，并向拖拽引擎供给触点
 pub struct TchpdEng {
     pub engine: DrgEng,
     devices: HashMap<isize, DevCaps>,
     curdev: Option<isize>,
 }
 
-/// Per-device data cached once, since preparsed data and value caps never
-/// change while a device stays connected.
+// 按设备缓存的数据，设备连接期间预解析数据与用途上限不会变化
 struct DevCaps {
     devid: String,
     prsdt: PrsDt,
@@ -41,7 +40,7 @@ struct DevCaps {
 }
 
 impl TchpdEng {
-    /// Creates an engine with empty caches.
+    // 构造缓存为空的引擎
     pub fn new() -> Self {
         Self {
             engine: DrgEng::new(),
@@ -50,7 +49,7 @@ impl TchpdEng {
         }
     }
 
-    /// Subscribes the window to precision touchpad input reports.
+    // 注册窗口以接收精密触摸板输入报告
     pub fn register(hwnd: HWND) -> Result<()> {
         let device = RAWINPUTDEVICE {
             usUsagePage: PTP_UP,
@@ -60,18 +59,18 @@ impl TchpdEng {
         };
         unsafe {
             RegisterRawInputDevices(&[device], std::mem::size_of::<RAWINPUTDEVICE>() as u32)
-                .map_err(|e| anyhow::anyhow!("RegisterRawInputDevices failed: {e:?}"))?;
+                .map_err(|e| anyhow::anyhow!("注册原始输入失败: {e:?}"))?;
         }
         Ok(())
     }
 
-    /// Invalidates cached device data after a device add or removal.
+    // 设备增删后使缓存的设备数据失效
     pub fn ondevchg(&mut self, _hdev: HANDLE) {
         self.devices.clear();
         self.curdev = None;
     }
 
-    /// Parses a WM_INPUT payload into the contact list, or None on failure.
+    // 将 WM_INPUT 载荷解析为触点列表，失败时返回 None
     pub fn prsinp(&mut self, lparam: isize) -> Option<Vec<TpCtc>> {
         unsafe {
             let buf = self.rdrawinp(lparam)?;
@@ -84,7 +83,7 @@ impl TchpdEng {
                 self.devices.insert(hdev, caps);
             }
 
-            // The HID payload sits at the tail of the raw input buffer.
+            // HID 载荷位于原始输入缓冲区的尾部
             let hid = raw.data.hid;
             let hidlen = (hid.dwSizeHid * hid.dwCount) as usize;
             let hiddata = &buf[buf.len() - hidlen..];
@@ -100,7 +99,7 @@ impl TchpdEng {
         }
     }
 
-    /// Copies the full raw input payload for the given WM_INPUT handle.
+    // 按 WM_INPUT 句柄复制完整的原始输入载荷
     unsafe fn rdrawinp(&self, lparam: isize) -> Option<Vec<u8>> {
         let mut size = 0u32;
         let hdrsz = std::mem::size_of::<RAWINPUTHEADER>() as u32;
@@ -126,7 +125,7 @@ impl TchpdEng {
         Some(buf)
     }
 
-    /// Resolves device identity and value caps, cached for later reports.
+    // 解析设备标识与用途上限，供后续报告复用
     unsafe fn fchdevcaps(&self, hdev: isize, handle: HANDLE) -> Option<DevCaps> {
         let devid = self.cmpdevid(hdev)?;
         let prsdt = self.fchprsdt(handle)?;
@@ -138,7 +137,7 @@ impl TchpdEng {
         })
     }
 
-    /// Reads the device's preparsed HID data.
+    // 读取设备的 HID 预解析数据
     unsafe fn fchprsdt(&self, handle: HANDLE) -> Option<PrsDt> {
         let mut size = 0u32;
         if GetRawInputDeviceInfoW(Some(handle), RIDI_PREPARSEDDATA, None, &mut size) != 0 {
@@ -157,7 +156,7 @@ impl TchpdEng {
         Some(PrsDt(buf))
     }
 
-    /// Rebuilds one contact per HID report from the decoded value caps.
+    // 依据用途上限从每个 HID 报告还原一个触点
     unsafe fn prsctc(
         &self,
         rawdata: &[u8],
@@ -228,7 +227,7 @@ impl TchpdEng {
         Some(contacts)
     }
 
-    /// Hashes the raw device name into a stable identifier for config keys.
+    // 将设备名散列为稳定标识，用作配置键
     unsafe fn cmpdevid(&self, hdev: isize) -> Option<String> {
         let mut size = 0u32;
         if GetRawInputDeviceInfoW(Some(HANDLE(hdev as _)), RIDI_DEVICENAME, None, &mut size) != 0 {
@@ -248,7 +247,7 @@ impl TchpdEng {
             return None;
         }
         let text = String::from_utf16_lossy(&name);
-        // Confirm the device really is a precision touchpad before trusting it.
+        // 确认设备确为精密触摸板后再采纳
         let info = self.fchdevinf(hdev)?;
         if info.0 != PTP_UP || info.1 != PTP_US {
             return None;
@@ -256,7 +255,7 @@ impl TchpdEng {
         Some(format!("{:x}", md5::compute(text.trim_end_matches('\0'))))
     }
 
-    /// Reads the usage page and usage of a raw input HID device.
+    // 读取原始输入 HID 设备的用途页与用途
     unsafe fn fchdevinf(&self, hdev: isize) -> Option<(u16, u16)> {
         let mut size = 0u32;
         if GetRawInputDeviceInfoW(Some(HANDLE(hdev as _)), RIDI_DEVICEINFO, None, &mut size) != 0 {
@@ -280,7 +279,7 @@ impl TchpdEng {
         Some((hid.usUsagePage, hid.usUsage))
     }
 
-    /// Identifier of the touchpad that produced the most recent report.
+    // 最近一次报告来源触摸板的标识
     pub fn curdevid(&self) -> String {
         self.curdev
             .and_then(|h| self.devices.get(&h))
@@ -289,10 +288,10 @@ impl TchpdEng {
     }
 }
 
-/// Owned preparsed HID data buffer.
+// 持有的 HID 预解析数据缓冲区
 struct PrsDt(Vec<u8>);
 
-/// HID value caps sorted so collection 0 (contact count) is read first.
+// 读取 HID 用途上限，并排序使集合 0（触点数）最先处理
 unsafe fn qryvalcap(prsdt: &PrsDt) -> Option<Vec<HIDP_VALUE_CAPS>> {
     let pptr = PHIDP_PREPARSED_DATA(prsdt.0.as_ptr() as isize);
 
@@ -314,7 +313,7 @@ unsafe fn qryvalcap(prsdt: &PrsDt) -> Option<Vec<HIDP_VALUE_CAPS>> {
     Some(valcaps)
 }
 
-/// Accumulates the id/x/y fields a contact is assembled from.
+// 累积组装触点所需的 id/x/y 三个字段
 #[derive(Default)]
 struct CtcMaker {
     cid: Option<i32>,
@@ -323,7 +322,7 @@ struct CtcMaker {
 }
 
 impl CtcMaker {
-    /// Returns the contact once all three fields have been filled.
+    // 三个字段齐备后返回触点
     fn build(&self) -> Option<TpCtc> {
         Some(TpCtc {
             id: self.cid?,
@@ -332,7 +331,7 @@ impl CtcMaker {
         })
     }
 
-    /// Resets the accumulator for the next contact.
+    // 为下一个触点重置累积器
     fn clear(&mut self) {
         self.cid = None;
         self.cx = None;

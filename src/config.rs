@@ -7,15 +7,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::lang::Lang;
 
-/// Current on-disk settings schema version.
+// 配置文件当前版本号
 const CFG_VER: i32 = 1;
 
-/// Minimum delay before releasing the drag button, in milliseconds. Precision
-/// Touchpads report roughly every 10 ms, so a shorter window cannot tell a
-/// finger release apart from a dropped report.
+// 释放拖拽按键前的最小延迟毫秒数
 pub const RLS_FNG_THR_MS: u32 = 40;
 
-/// Persisted settings. Field names are part of the JSON file contract.
+// 持久化配置，字段名即 JSON 文件契约
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub version: i32,
@@ -29,13 +27,13 @@ pub struct Config {
     pub stop_threshold: f32,
     pub run_elevated: bool,
     pub start_at_boot: bool,
-    /// Interface language; absent files default to the system UI language.
+    // 界面语言，旧文件中缺省时跟随系统
     #[serde(default)]
     pub lang: Lang,
     pub device_configs: HashMap<String, DevCfg>,
 }
 
-/// Mouse button held during a three-finger drag.
+// 三指拖拽期间按住的鼠标键
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Btn {
@@ -44,7 +42,7 @@ pub enum Btn {
     Middle,
 }
 
-/// Per-touchpad cursor movement tuning.
+// 单个触摸板的光标移动参数
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevCfg {
     pub cursor_move: bool,
@@ -52,6 +50,7 @@ pub struct DevCfg {
     pub cursor_acceleration: f32,
 }
 
+// 配置文件默认值
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -72,6 +71,7 @@ impl Default for Config {
     }
 }
 
+// 单设备配置默认值
 impl Default for DevCfg {
     fn default() -> Self {
         Self {
@@ -83,9 +83,7 @@ impl Default for DevCfg {
 }
 
 impl Config {
-    /// Delay before the held button releases when no input arrives. Honours the
-    /// configured delay only when release-and-restart is on, otherwise falls
-    /// back to the raw finger-release threshold.
+    // 无新输入时释放按键前的等待时长
     pub fn rlsdly(&self) -> u32 {
         if self.allow_release_and_restart {
             self.release_delay_ms.max(RLS_FNG_THR_MS)
@@ -94,41 +92,41 @@ impl Config {
         }
     }
 
-    /// Reads settings from disk, creating a default file on first run.
+    // 读入配置，首次运行时创建默认文件
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             let cfg = Config::default();
             cfg.save(path)?;
             return Ok(cfg);
         }
-        let text = fs::read_to_string(path).context("read config")?;
-        let mut cfg: Config = serde_json::from_str(&text).context("parse config")?;
+        let text = fs::read_to_string(path).context("读取配置失败")?;
+        let mut cfg: Config = serde_json::from_str(&text).context("解析配置失败")?;
         if cfg.version != CFG_VER {
             cfg.version = CFG_VER;
         }
         Ok(cfg)
     }
 
-    /// Writes settings to disk, creating the parent directory if needed.
+    // 写出配置，必要时创建父目录
     pub fn save(&self, path: &Path) -> Result<()> {
-        let text = serde_json::to_string_pretty(self).context("serialize config")?;
+        let text = serde_json::to_string_pretty(self).context("序列化配置失败")?;
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).context("create config dir")?;
+            fs::create_dir_all(parent).context("创建配置目录失败")?;
         }
-        fs::write(path, text).context("write config")?;
+        fs::write(path, text).context("写入配置失败")?;
         Ok(())
     }
 
-    /// Returns the stored config for a touchpad, or the defaults.
+    // 取指定触摸板的配置，缺省时返回默认值
     pub fn devcfg(&self, devid: &str) -> DevCfg {
         self.device_configs.get(devid).cloned().unwrap_or_default()
     }
 }
 
-/// Location of the settings file under the user's roaming data directory.
+// 用户数据目录下的配置文件路径
 pub fn cfgpath() -> Result<PathBuf> {
     let dir = dirs::data_dir()
-        .context("data_dir")?
+        .context("无法获取数据目录")?
         .join("TriDragForIwmei");
     Ok(dir.join("config.json"))
 }

@@ -8,18 +8,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 
 use crate::config::Btn;
 
-/// Sub-pixel remainder carried between moves, since SendInput moves in whole
-/// pixels only.
+// 两次移动间保留的亚像素余量，SendInput 只能按整像素移动
 static FRACTION: Mutex<(f32, f32)> = Mutex::new((0.0, 0.0));
 
-/// Which edge of a mouse button the engine wants to emit.
+// 引擎要求发出的按键边沿
 #[derive(Debug, Clone, Copy)]
 pub enum BtEv {
     Down,
     Up,
 }
 
-/// A 2D offset in touchpad units.
+// 触摸板坐标系下的二维偏移
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Point {
     pub x: f32,
@@ -27,24 +26,24 @@ pub struct Point {
 }
 
 impl Point {
-    /// Builds a point from raw coordinates.
+    // 由原始坐标构造
     pub fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
 
-    /// Euclidean length of the offset.
+    // 偏移的欧氏长度
     pub fn length(&self) -> f32 {
         (self.x * self.x + self.y * self.y).sqrt()
     }
 
-    /// Scales both components in place.
+    // 就地对两个分量做缩放
     pub fn multiply(&mut self, m: f32) {
         self.x *= m;
         self.y *= m;
     }
 }
 
-/// Moves the cursor by a relative offset, carrying the sub-pixel remainder.
+// 按相对偏移移动光标，并结转亚像素余量
 pub fn sndmov(dx: f32, dy: f32) {
     let (ix, iy) = {
         let mut frac = FRACTION.lock().unwrap();
@@ -64,7 +63,7 @@ pub fn sndmov(dx: f32, dy: f32) {
     sndmsinp(ix, iy, MOUSEEVENTF_MOVE);
 }
 
-/// Presses the configured mouse button.
+// 按下配置指定的鼠标键
 pub fn sndbtndwn(button: Btn) {
     let flag = match button {
         Btn::Left => MOUSEEVENTF_LEFTDOWN,
@@ -74,7 +73,7 @@ pub fn sndbtndwn(button: Btn) {
     sndmsinp(0, 0, flag);
 }
 
-/// Releases the configured mouse button.
+// 松开配置指定的鼠标键
 pub fn sndbtnup(button: Btn) {
     let flag = match button {
         Btn::Left => MOUSEEVENTF_LEFTUP,
@@ -84,7 +83,7 @@ pub fn sndbtnup(button: Btn) {
     sndmsinp(0, 0, flag);
 }
 
-/// Injects a single mouse input event.
+// 注入一次鼠标输入事件
 fn sndmsinp(dx: i32, dy: i32, flags: MOUSE_EVENT_FLAGS) {
     let input = INPUT {
         r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_MOUSE,

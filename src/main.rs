@@ -1,5 +1,4 @@
-// Build as a GUI binary so Windows never allocates a console window. Debug
-// builds keep the console so log output stays visible during development.
+// 编译为 GUI 程序以免 Windows 分配控制台窗口，调试构建保留控制台便于查看输出
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::env;
@@ -26,12 +25,12 @@ use config::Config;
 use touchpad::TchpdEng;
 use tray::Tray;
 
+// 托盘图标的回调消息号
 const WM_APP_TRAY: u32 = WM_APP + 1;
 
-/// Application entry: dispatches privileged helper runs, then starts the tray.
+// 程序入口：先分派提权辅助模式，否则启动托盘
 fn main() -> Result<()> {
-    // Logging comes first so a failure on any later step is recorded. As a GUI
-    // binary there is no console, so the log file is the only diagnostic.
+    // 日志最先初始化，后续任一步骤失败才有据可查
     utils::initlog()?;
 
     let result = if let Some(mode) = hlprmode() {
@@ -46,7 +45,7 @@ fn main() -> Result<()> {
     result
 }
 
-/// Sets up the single instance, window, tray and message loop.
+// 建立单实例、窗口、托盘并进入消息循环
 fn runapp() -> Result<()> {
     let _single = utils::snglinst()?;
     info!("Starting tridragforiwmei");
@@ -78,7 +77,7 @@ fn runapp() -> Result<()> {
     Ok(())
 }
 
-/// Runtime state shared with the window procedure via GWLP_USERDATA.
+// 经 GWLP_USERDATA 与窗口过程共享的运行时状态
 struct ApSt {
     tray: Tray,
     config: Config,
@@ -86,7 +85,7 @@ struct ApSt {
     touchpad: TchpdEng,
 }
 
-/// Registers the window class and creates the hidden top-level window.
+// 注册窗口类并创建隐藏的顶层窗口
 fn mkmsgwnd() -> Result<HWND> {
     let instance = unsafe { GetModuleHandleW(None)? };
     let clsname = w!("TriDragForIwmeiMessageWindow");
@@ -103,8 +102,7 @@ fn mkmsgwnd() -> Result<HWND> {
         anyhow::bail!("RegisterClassExW failed");
     }
 
-    // RIDEV_INPUTSINK needs a real top-level window; a message-only window
-    // never receives WM_INPUT. Hide it from the taskbar and from Alt+Tab.
+    // RIDEV_INPUTSINK 需要真实顶层窗口，仅消息窗口收不到 WM_INPUT
     unsafe {
         CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -124,7 +122,7 @@ fn mkmsgwnd() -> Result<HWND> {
     }
 }
 
-/// Pumps the thread message queue until WM_QUIT.
+// 抽送线程消息队列直至收到 WM_QUIT
 unsafe fn runmsgloop() {
     let mut msg = MSG::default();
     while GetMessageW(&mut msg, None, 0, 0).into() {
@@ -133,7 +131,7 @@ unsafe fn runmsgloop() {
     }
 }
 
-/// Routes window messages to their handlers.
+// 将窗口消息分派到各处理函数
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_INPUT => hndlinp(hwnd, lparam),
@@ -145,7 +143,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
-/// Feeds touchpad contacts into the drag engine and emits mouse events.
+// 将触摸板触点送入拖拽引擎并发出鼠标事件
 unsafe fn hndlinp(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let app = getapst(hwnd);
     if app.config.enabled {
@@ -168,14 +166,14 @@ unsafe fn hndlinp(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     DefWindowProcW(hwnd, WM_INPUT, WPARAM(lparam.0 as _), lparam)
 }
 
-/// Drops cached touchpad caps so the next report re-queries the device set.
+// 设备增删后清除触摸板缓存
 unsafe fn hndldevchg(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let app = getapst(hwnd);
     app.touchpad.ondevchg(HANDLE(lparam.0 as _));
     DefWindowProcW(hwnd, WM_INPUT_DEVICE_CHANGE, WPARAM(0), lparam)
 }
 
-/// Forwards tray callback messages to the tray menu.
+// 将托盘回调消息转交托盘菜单处理
 unsafe fn hndltray(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let app = getapst(hwnd);
     app.tray
@@ -183,7 +181,7 @@ unsafe fn hndltray(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     LRESULT(0)
 }
 
-/// Ends a drag once the release delay elapses without new input.
+// 释放延迟内无新输入时结束拖拽
 unsafe fn hndltmr(hwnd: HWND, wparam: WPARAM) -> LRESULT {
     let app = getapst(hwnd);
     if wparam.0 == touchpad::RLS_TMR_ID {
@@ -195,7 +193,7 @@ unsafe fn hndltmr(hwnd: HWND, wparam: WPARAM) -> LRESULT {
     DefWindowProcW(hwnd, WM_TIMER, wparam, LPARAM(0))
 }
 
-/// Persists config and quits the message loop.
+// 保存配置并退出消息循环
 unsafe fn hndldstr(hwnd: HWND) -> LRESULT {
     let app = getapst(hwnd);
     let _ = app.config.save(&app.cfgpath);
@@ -203,20 +201,20 @@ unsafe fn hndldstr(hwnd: HWND) -> LRESULT {
     LRESULT(0)
 }
 
-/// Reads the application state pointer stored in the window user data.
+// 读取窗口用户数据中保存的应用状态指针
 unsafe fn getapst(hwnd: HWND) -> &'static mut ApSt {
     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     &mut *(ptr as *mut ApSt)
 }
 
-/// Privileged setup modes run by an elevated copy of this binary.
+// 由本程序的提权副本执行的辅助模式
 #[derive(Clone, Copy)]
 enum Hlpr {
     EnbStartup,
     DsbStartup,
 }
 
-/// Detects a helper invocation from the command line.
+// 从命令行识别辅助模式调用
 fn hlprmode() -> Option<Hlpr> {
     env::args().skip(1).find_map(|arg| match arg.as_str() {
         "--task-enable" => Some(Hlpr::EnbStartup),
@@ -225,7 +223,7 @@ fn hlprmode() -> Option<Hlpr> {
     })
 }
 
-/// Applies the requested startup task state, then exits.
+// 应用所请求的登录任务状态后退出
 fn runhlpr(mode: Hlpr) -> Result<()> {
     let enabled = matches!(mode, Hlpr::EnbStartup);
     let result = scheduler::setstp(enabled);

@@ -4,16 +4,16 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use log::info;
 
-/// Registered name and folder of the logon task.
+// 登录任务在计划程序中的名称与目录
 const TSKNAME: &str = "TriDragForIwmeiStartup";
 const TSKFOLDER: &str = "\\TriDragForIwmei";
 
-/// Full task path used by schtasks.
+// schtasks 使用的完整任务路径
 fn tskpath() -> String {
     format!("{TSKFOLDER}\\{TSKNAME}")
 }
 
-/// Whether the logon task is currently registered.
+// 登录任务当前是否已注册
 pub fn isstpenb() -> bool {
     Command::new("schtasks.exe")
         .args(["/Query", "/TN", &tskpath()])
@@ -22,8 +22,7 @@ pub fn isstpenb() -> bool {
         .unwrap_or(false)
 }
 
-/// Brings the logon task in line with `enabled`, doing nothing when it already
-/// matches so unrelated tasks are never touched.
+// 使登录任务与 enabled 一致，状态相符时不动作以免波及无关任务
 pub fn setstp(enabled: bool) -> Result<()> {
     if enabled == isstpenb() {
         return Ok(());
@@ -35,13 +34,12 @@ pub fn setstp(enabled: bool) -> Result<()> {
     }
 }
 
-/// Registers the logon task that relaunches this executable after sign-in.
+// 注册登录后重新拉起本程序的任务
 fn enbstartup() -> Result<()> {
-    let exe = std::env::current_exe().context("current_exe")?;
+    let exe = std::env::current_exe().context("获取当前程序路径失败")?;
     let exestr = exe.to_string_lossy();
-    // A SID is used rather than a user name because names containing spaces or
-    // non-ASCII characters fail the account lookup.
-    let user = crate::utils::curusrsid().context("resolve current user SID")?;
+    // 使用 SID 而非用户名，含空格或非 ASCII 的账户名无法通过名称查找
+    let user = crate::utils::curusrsid().context("获取当前用户 SID 失败")?;
 
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
@@ -82,10 +80,9 @@ fn enbstartup() -> Result<()> {
         command = xmlescp(&exestr)
     );
 
-    // schtasks expects a UTF-16 file, so the declared encoding must match the
-    // bytes actually written.
+    // schtasks 要求 UTF-16 文件，磁盘字节需与声明编码一致
     let temp = std::env::temp_dir().join("tridragforiwmei_task.xml");
-    wrutf16(&temp, &xml).context("write task xml")?;
+    wrutf16(&temp, &xml).context("写入任务 XML 失败")?;
 
     let output = Command::new("schtasks.exe")
         .args([
@@ -97,36 +94,36 @@ fn enbstartup() -> Result<()> {
             "/F",
         ])
         .output()
-        .context("run schtasks /Create")?;
+        .context("执行 schtasks /Create 失败")?;
 
     std::fs::remove_file(temp).ok();
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("schtasks /Create failed: {stderr}");
+        bail!("schtasks /Create 失败: {stderr}");
     }
 
     info!("Startup task enabled");
     Ok(())
 }
 
-/// Removes the logon task.
+// 删除登录任务
 fn dsbstartup() -> Result<()> {
     let output = Command::new("schtasks.exe")
         .args(["/Delete", "/TN", &tskpath(), "/F"])
         .output()
-        .context("run schtasks /Delete")?;
+        .context("执行 schtasks /Delete 失败")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("schtasks /Delete failed: {stderr}");
+        bail!("schtasks /Delete 失败: {stderr}");
     }
 
     info!("Startup task disabled");
     Ok(())
 }
 
-/// Writes `text` as UTF-16LE with a BOM, the form schtasks reads.
+// 以 schtasks 可读的 UTF-16LE 带 BOM 格式写出文本
 fn wrutf16(path: &Path, text: &str) -> std::io::Result<()> {
     let mut bytes = Vec::with_capacity(text.len() * 2 + 2);
     bytes.extend_from_slice(&[0xFF, 0xFE]);
@@ -136,7 +133,7 @@ fn wrutf16(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::write(path, bytes)
 }
 
-/// Escapes the XML metacharacters in `s`.
+// 转义 XML 元字符
 fn xmlescp(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

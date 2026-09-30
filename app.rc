@@ -1,0 +1,13 @@
+// Windows resource script: application icon and manifest.
+//
+// The icon id 1 is what LoadIconW/LoadImage resolve to, and is also the icon
+// Windows shows in Explorer and the taskbar. The manifest carries the DPI
+// awareness and execution level declarations.
+
+#include <winres.h>
+
+// Application and tray icon, embedded so the binary stays self-contained.
+1 ICON "assets/icon.ico"
+
+// Side-by-side manifest: per-monitor DPI awareness, asInvoker, supported OS.
+1 24 "tridragforiwmei.exe.manifest"

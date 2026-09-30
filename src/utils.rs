@@ -15,29 +15,27 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-/// Redirects logging to a file under the user's roaming data directory.
+// 将日志重定向到用户数据目录下的文件
 pub fn initlog() -> Result<()> {
     let dir = dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("TriDragForIwmei");
     fs::create_dir_all(&dir)?;
     let path = dir.join("tridragforiwmei.log");
-    let file = File::create(&path).context("open log file")?;
-    WriteLogger::init(LevelFilter::Debug, LogConfig::default(), file).context("init logger")?;
+    let file = File::create(&path).context("打开日志文件失败")?;
+    WriteLogger::init(LevelFilter::Debug, LogConfig::default(), file).context("初始化日志失败")?;
     info!("Log file: {:?}", path);
     Ok(())
 }
 
-/// Whether this process currently holds administrator rights.
+// 当前进程是否具备管理员权限
 pub fn isadmin() -> bool {
     unsafe { IsUserAnAdmin().into() }
 }
 
-/// Relaunches this executable elevated with the shell "runas" verb, passing
-/// `args`. Returns an error when the user cancels the UAC prompt so the caller
-/// can leave its state unchanged.
+// 以 runas 动词重新拉起本程序并附加参数，用户取消 UAC 时返回错误
 pub fn runelev(args: &str) -> Result<()> {
-    let exe = std::env::current_exe().context("current_exe")?;
+    let exe = std::env::current_exe().context("获取当前程序路径失败")?;
     let exewide = widen(&exe.to_string_lossy());
     let argswide = widen(args);
 
@@ -52,7 +50,7 @@ pub fn runelev(args: &str) -> Result<()> {
     };
 
     unsafe {
-        ShellExecuteExW(&mut info).context("ShellExecuteExW(runas)")?;
+        ShellExecuteExW(&mut info).context("提权启动失败")?;
         if !info.hProcess.is_invalid() {
             let _ = CloseHandle(info.hProcess);
         }
@@ -60,18 +58,18 @@ pub fn runelev(args: &str) -> Result<()> {
     Ok(())
 }
 
-/// Returns the current user's SID string, e.g. "S-1-5-21-...".
+// 取当前用户的安全标识符字符串，形如 S-1-5-21-...
 pub fn curusrsid() -> Result<String> {
     unsafe {
         let mut token = HANDLE::default();
         OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
-            .context("OpenProcessToken")?;
+            .context("打开进程令牌失败")?;
 
         let result = (|| -> Result<String> {
             let mut size = 0u32;
             let _ = GetTokenInformation(token, TokenUser, None, 0, &mut size);
             if size == 0 {
-                anyhow::bail!("GetTokenInformation returned no size");
+                anyhow::bail!("获取令牌信息长度失败");
             }
 
             let mut buf = vec![0u8; size as usize];
@@ -82,14 +80,13 @@ pub fn curusrsid() -> Result<String> {
                 size,
                 &mut size,
             )
-            .context("GetTokenInformation")?;
+            .context("获取令牌信息失败")?;
 
             let tuser = &*(buf.as_ptr() as *const TOKEN_USER);
             let mut sidstr = PWSTR::null();
-            ConvertSidToStringSidW(tuser.User.Sid, &mut sidstr)
-                .context("ConvertSidToStringSidW")?;
+            ConvertSidToStringSidW(tuser.User.Sid, &mut sidstr).context("转换 SID 失败")?;
 
-            let sid = sidstr.to_string().context("SID is not valid UTF-8")?;
+            let sid = sidstr.to_string().context("SID 不是合法 UTF-8")?;
             let _ = LocalFree(Some(HLOCAL(sidstr.0 as _)));
             Ok(sid)
         })();
@@ -99,20 +96,20 @@ pub fn curusrsid() -> Result<String> {
     }
 }
 
-/// Takes ownership of a named mutex so only one instance can run.
+// 占用具名互斥体，确保只有一个实例在运行
 pub fn snglinst() -> Result<SnglInst> {
     let name = w!("Global\\TriDragForIwmeiSingleInstance");
     unsafe {
         let handle = CreateMutexW(None, true, name)?;
         if GetLastError() == WIN32_ERROR(183) {
             CloseHandle(handle)?;
-            anyhow::bail!("Another instance is already running");
+            anyhow::bail!("已有实例在运行");
         }
         Ok(SnglInst(handle))
     }
 }
 
-/// Releases the single-instance mutex when dropped.
+// 实例守卫，释放时归还互斥体
 pub struct SnglInst(HANDLE);
 
 impl Drop for SnglInst {
@@ -123,7 +120,7 @@ impl Drop for SnglInst {
     }
 }
 
-/// Expands a string into a NUL-terminated UTF-16 buffer.
+// 将字符串展开为以 NUL 结尾的 UTF-16 缓冲区
 fn widen(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
